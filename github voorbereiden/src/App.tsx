@@ -1,0 +1,3154 @@
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { 
+  LineId, Order, Bunker, Melding, Storing, AppConfig, Truck 
+} from './types';
+import { 
+  LINES, DEFAULT_CFG, INITIAL_BUNKERS 
+} from './constants';
+import { 
+  fmt, ev, rt, sl, normalizeEta, materialsEquivalent, swCount, getSwitchMaterials, etaToMins 
+} from './utils';
+import { fetchOrdersFromSheet, fetchBunkersFromSheet, CalibrationMaterial } from './services/sheetService';
+import { 
+  LayoutDashboard, ClipboardList, Database, Settings, Bell, 
+  Truck as TruckIcon, CheckCircle2, Play, X, ChevronUp, ChevronDown,
+  Wrench, AlertTriangle, Check, Clock, Pencil, RefreshCw, Package
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+
+type LineTimingSettings = {
+  dayStart: string;
+  firstOrderStart: string;
+};
+
+type ScheduledLineEntry = {
+  order: Order;
+  startTime: Date;
+  prodStart: Date;
+  endTime: Date;
+  swMats: string[];
+  sw: number;
+  duration: number;
+};
+
+type GapDebugCandidate = {
+  orderId: number;
+  customer: string;
+  neededMinutes: number;
+  filledMinutes: number;
+  volume: number;
+  remainder: number;
+  valid: boolean;
+  reason: string;
+};
+
+type GapDebugEntry = {
+  line: LineId;
+  afterOrderId: number;
+  beforeOrderId: number;
+  gapMinutes: number;
+  chosenOrderId: number | null;
+  candidates: GapDebugCandidate[];
+};
+
+export default function App() {
+  const [view, setView] = useState<'operator' | 'planner' | 'bunkers' | 'settings' | 'notifications'>('operator');
+  const [plannerTab, setPlannerTab] = useState<'schema' | 'wachtrij' | 'bunkerkaart' | 'vrachtwagens' | 'voltooid'>('schema');
+  const [selectedLine, setSelectedLine] = useState<LineId>(() => {
+    const saved = localStorage.getItem('kd_selected_line');
+    return saved ? (parseInt(saved, 10) as LineId) : 1;
+  });
+  const [selectedOrderForDetail, setSelectedOrderForDetail] = useState<Order | null>(null);
+  const [plannerLineFilter, setPlannerLineFilter] = useState<number>(0); // 0 = Alle lijnen
+  const [plannerSearch, setPlannerSearch] = useState('');
+  const [plannerSort, setPlannerSort] = useState('default');
+  const [plannedOrderIdsByLine, setPlannedOrderIdsByLine] = useState<Record<LineId, number[]> | null>(null);
+  const [isRecalculating, setIsRecalculating] = useState(false);
+  const [gapDebug, setGapDebug] = useState<GapDebugEntry[]>([]);
+  const [orders, setOrders] = useState<Order[]>(() => {
+    const saved = localStorage.getItem('kd_orders');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [dataSource, setDataSource] = useState(() => {
+    const saved = localStorage.getItem('kd_datasource');
+    const defaultData = {
+      sheetUrl: 'https://docs.google.com/spreadsheets/d/1Byj_fUun6JMpbiv8WJKi1jnWIuQlRpsbMEpugxc2zC8/edit?gid=0#gid=0',
+      calibrationUrls: {
+        1: 'https://docs.google.com/spreadsheets/d/17aCk5YCMQDb93r6oseFlGG04V-IRTbEEdAByGRFF0Zc/edit?gid=0',
+        2: 'https://docs.google.com/spreadsheets/d/17aCk5YCMQDb93r6oseFlGG04V-IRTbEEdAByGRFF0Zc/edit?gid=829830734',
+        3: 'https://docs.google.com/spreadsheets/d/17aCk5YCMQDb93r6oseFlGG04V-IRTbEEdAByGRFF0Zc/edit?gid=1856803997'
+      },
+      lastSync: null as string | null,
+      loading: false,
+      error: null as string | null
+    };
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        // Migratie: als er nog een oude calibrationUrl is, of als de URLs de generieke link zijn, herstel naar defaults
+        const genericUrl = 'https://docs.google.com/spreadsheets/d/1Byj_fUun6JMpbiv8WJKi1jnWIuQlRpsbMEpugxc2zC8/edit?gid=0#gid=0';
+        
+        if (parsed.calibrationUrl || !parsed.calibrationUrls || 
+            Object.values(parsed.calibrationUrls).some(url => url === genericUrl)) {
+          parsed.calibrationUrls = { ...defaultData.calibrationUrls };
+          delete parsed.calibrationUrl;
+        }
+        
+        return { ...defaultData, ...parsed, loading: false };
+      } catch (e) {
+        return defaultData;
+      }
+    }
+    return defaultData;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('kd_datasource', JSON.stringify(dataSource));
+  }, [dataSource]);
+
+  useEffect(() => {
+    localStorage.setItem('kd_orders', JSON.stringify(orders));
+  }, [orders]);
+
+  useEffect(() => {
+    localStorage.setItem('kd_selected_line', selectedLine.toString());
+  }, [selectedLine]);
+
+  const laadOrders = async () => {
+    setDataSource(prev => ({ ...prev, loading: true, error: null }));
+    try {
+      const importedOrders = await fetchOrdersFromSheet(dataSource.sheetUrl);
+      
+      setOrders(prev => {
+        // Behoud orders die al voltooid zijn, aan het draaien zijn of gearriveerd zijn
+        const completed = prev.filter(o => o.status === 'completed');
+        const active = prev.filter(o => o.status === 'running' || o.status === 'arrived');
+        
+        const preservedKeys = new Set([
+          ...completed.map(o => `${o.num}|${o.rit}|${o.recipe}|${o.line}`),
+          ...active.map(o => `${o.num}|${o.rit}|${o.recipe}|${o.line}`)
+        ]);
+        
+        const newOrders = importedOrders.filter(o => !preservedKeys.has(`${o.num}|${o.rit}|${o.recipe}|${o.line}`));
+        return [...completed, ...active, ...newOrders];
+      });
+
+      setDataSource(prev => ({ ...prev, loading: false, lastSync: new Date().toISOString() }));
+      
+      const newMelding: Melding = {
+        id: Date.now(),
+        type: importedOrders.length > 0 ? 'ok' : 'waarschuwing',
+        icon: importedOrders.length > 0 ? '✅' : '⚠️',
+        titel: importedOrders.length > 0 ? 'Orders gesynchroniseerd' : 'Geen orders gevonden',
+        tekst: importedOrders.length > 0 
+          ? `${importedOrders.length} orders geladen uit Google Sheets`
+          : 'Geen geldige orders gevonden in de sheet. Controleer de kolomkoppen en tabblad-namen.',
+        lijn: null,
+        orderNum: null,
+        tijd: new Date(),
+        gelezen: false
+      };
+      setNotifications(prev => [newMelding, ...prev]);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Sync mislukt';
+      setDataSource(prev => ({ ...prev, loading: false, error: errorMsg }));
+      setNotifications(prev => [{
+        id: Date.now(),
+        type: 'fout',
+        icon: '🔴',
+        titel: 'Sync mislukt',
+        tekst: errorMsg,
+        lijn: null,
+        orderNum: null,
+        tijd: new Date(),
+        gelezen: false
+      }, ...prev]);
+    }
+  };
+
+  const laadKalibratie = async () => {
+    setDataSource(prev => ({ ...prev, loading: true, error: null }));
+    try {
+      const urls = dataSource.calibrationUrls;
+      const results = await Promise.all([
+        fetchBunkersFromSheet(urls[1], 1),
+        fetchBunkersFromSheet(urls[2], 2),
+        fetchBunkersFromSheet(urls[3], 3)
+      ]);
+      
+      const importedBunkers: Record<LineId, Bunker[]> = {
+        1: results[0].bunkers[1],
+        2: results[1].bunkers[2],
+        3: results[2].bunkers[3]
+      };
+      
+      // Merge materials and deduplicate by name
+      const allMaterials = results.flatMap(r => r.materials);
+      const materialsMap = new Map<string, CalibrationMaterial>();
+      allMaterials.forEach(m => {
+        const existing = materialsMap.get(m.name);
+        if (!existing || (m.calibrationValue !== null && existing.calibrationValue === null)) {
+          materialsMap.set(m.name, m);
+        }
+      });
+      const importedMaterials = Array.from(materialsMap.values());
+      
+      const hasBunkers = Object.values(importedBunkers).some(arr => arr.length > 0);
+      const hasMaterials = importedMaterials.length > 0;
+
+      // Merge with existing bunkers to prevent losing bunkers not in the sheet
+      setBunkers(prev => {
+        const newBunkers = { ...prev };
+        (Object.keys(importedBunkers) as unknown as LineId[]).forEach(lid => {
+          // If the sheet has bunkers for this line, we use them
+          // If not, we keep the previous ones (or defaults)
+          if (importedBunkers[lid] && importedBunkers[lid].length > 0) {
+            newBunkers[lid] = importedBunkers[lid];
+          }
+        });
+        return newBunkers;
+      });
+      
+      setCalibrationMaterials(importedMaterials);
+
+      setDataSource(prev => ({ ...prev, loading: false, lastSync: new Date().toISOString() }));
+      
+      let titel = 'Kalibratie gesynchroniseerd';
+      let tekst = `Bunkergegevens geladen (${importedMaterials.length} grondstoffen gevonden)`;
+      let type: 'ok' | 'info' | 'fout' = 'ok';
+      let icon = '🎯';
+
+      const totalBunkers = Object.values(importedBunkers).reduce((acc, curr) => acc + curr.length, 0);
+
+      if (totalBunkers === 0 && importedMaterials.length > 0) {
+        titel = 'Grondstoffen geladen';
+        tekst = `${importedMaterials.length} grondstoffen gevonden, maar geen bunker-indeling.`;
+        type = 'info';
+        icon = '📦';
+      } else if (totalBunkers === 0 && importedMaterials.length === 0) {
+        titel = 'Geen data gevonden';
+        tekst = 'Geen bunkers of grondstoffen gevonden in de sheets. Controleer de tabblad-namen en kolomkoppen.';
+        type = 'info';
+        icon = '⚠️';
+      } else {
+        tekst = `${totalBunkers} bunkers bijgewerkt over ${Object.keys(importedBunkers).filter(k => importedBunkers[k as unknown as LineId].length > 0).length} lijnen.`;
+      }
+
+      const newMelding: Melding = {
+        id: Date.now(),
+        type,
+        icon,
+        titel,
+        tekst,
+        lijn: null,
+        orderNum: null,
+        tijd: new Date(),
+        gelezen: false
+      };
+      setNotifications(prev => [newMelding, ...prev]);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Kalibratie sync mislukt';
+      setDataSource(prev => ({ ...prev, loading: false, error: errorMsg }));
+      setNotifications(prev => [{
+        id: Date.now(),
+        type: 'fout',
+        icon: '🔴',
+        titel: 'Kalibratie sync mislukt',
+        tekst: errorMsg,
+        lijn: null,
+        orderNum: null,
+        tijd: new Date(),
+        gelezen: false
+      }, ...prev]);
+    }
+  };
+
+  // Initial Sync
+  useEffect(() => {
+    laadOrders();
+    laadKalibratie();
+  }, []);
+  const [arrivedOrder, setArrivedOrder] = useState<Order | null>(null);
+  const [arrivedTime, setArrivedTime] = useState('');
+  const [selectedBunker, setSelectedBunker] = useState<{ lid: LineId, bunker: Bunker } | null>(null);
+  const [calibrationMaterials, setCalibrationMaterials] = useState<CalibrationMaterial[]>([]);
+
+  const [showAllMaterials, setShowAllMaterials] = useState(false);
+
+  const handleBunkerUpdate = (lid: LineId, bunkerCode: string, newMaterial: string | null) => {
+    setBunkers(prev => {
+      const lineBunkers = [...prev[lid]];
+      const idx = lineBunkers.findIndex(b => b.c === bunkerCode);
+      if (idx !== -1) {
+        const bunker = lineBunkers[idx];
+        const calMat = calibrationMaterials.find(m => m.name === newMaterial);
+        
+        // Try to get material-specific data from the bunker itself (from the sheet)
+        const specificData = newMaterial ? bunker.materialData?.[newMaterial] : null;
+        
+        lineBunkers[idx] = { 
+          ...bunker, 
+          m: newMaterial,
+          mc: specificData?.code || calMat?.code || orders.flatMap(o => o.components).find(c => c.name === newMaterial)?.code || null,
+          calibrationValue: specificData?.calibrationValue ?? calMat?.calibrationValue ?? bunker.calibrationValue
+        };
+      }
+      return { ...prev, [lid]: lineBunkers };
+    });
+    setSelectedBunker(null);
+    setShowAllMaterials(false);
+  };
+
+  const handleArrivedConfirm = () => {
+    if (!arrivedOrder) return;
+    const confirmedEta = normalizeEta(arrivedTime);
+    if (!confirmedEta) return;
+    setOrders(prev => prev.map(o => 
+      o.id === arrivedOrder.id 
+        ? { ...o, eta: confirmedEta, status: 'arrived' } 
+        : o
+    ));
+    setArrivedOrder(null);
+    setArrivedTime('');
+  };
+  const [bunkers, setBunkers] = useState<Record<LineId, Bunker[]>>(INITIAL_BUNKERS);
+  const [notifications, setNotifications] = useState<Melding[]>([]);
+  const [storingen, setStoringen] = useState<Record<LineId, Storing | null>>({ 1: null, 2: null, 3: null });
+  const [config, setConfig] = useState<Record<LineId, AppConfig>>(() => {
+    const fallback: Record<LineId, AppConfig> = {
+      ...DEFAULT_CFG,
+      1: { ...DEFAULT_CFG[1], wissel: 5 }
+    };
+    const saved = localStorage.getItem('kd_config');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return {
+          1: { ...fallback[1], ...(parsed?.[1] || {}) },
+          2: { ...fallback[2], ...(parsed?.[2] || {}) },
+          3: { ...fallback[3], ...(parsed?.[3] || {}) }
+        };
+      } catch {
+        // ignore broken persisted config
+      }
+    }
+    return fallback;
+  });
+  const [lineTiming, setLineTiming] = useState<Record<LineId, LineTimingSettings>>(() => {
+    const saved = localStorage.getItem('kd_line_timing');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        // ignore broken persisted data
+      }
+    }
+    return {
+      1: { dayStart: '05:00', firstOrderStart: '05:15' },
+      2: { dayStart: '05:00', firstOrderStart: '05:15' },
+      3: { dayStart: '05:00', firstOrderStart: '05:15' }
+    };
+  });
+  const [progress, setProgress] = useState(0);
+  const [currentTime, setCurrentTime] = useState(new Date());
+
+  // Tickers
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    const progTimer = setInterval(() => {
+      setProgress(p => Math.min(p + 0.06, 99));
+    }, 3000);
+    return () => {
+      clearInterval(timer);
+      clearInterval(progTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('kd_line_timing', JSON.stringify(lineTiming));
+  }, [lineTiming]);
+
+  useEffect(() => {
+    localStorage.setItem('kd_config', JSON.stringify(config));
+  }, [config]);
+
+  const timeStringToMinutes = (value: string, fallback = 0) => {
+    const normalized = normalizeEta(value);
+    if (!normalized) return fallback;
+    const [hh, mm] = normalized.split(':').map(v => parseInt(v, 10));
+    if (Number.isNaN(hh) || Number.isNaN(mm)) return fallback;
+    return hh * 60 + mm;
+  };
+
+  const BAG_COOLDOWN_MINUTES = 90;
+  const isBagPkg = (order: Order | null) => order?.pkg?.toLowerCase() === 'bag';
+
+  const getTransitionMinutes = useCallback((lid: LineId, prevOrder: Order | null, nextOrder: Order, lineBunkersOverride?: Bunker[]) => {
+    if (!prevOrder) return 0;
+    const lineBunkers = lineBunkersOverride || bunkers[lid];
+    const sw = swCount(prevOrder, nextOrder, lineBunkers);
+
+    if (lid === 1) {
+      const includedSwitches = 3;
+      const extraSwitches = Math.max(0, sw - includedSwitches);
+      return 15 + (extraSwitches * config[lid].wissel);
+    }
+
+    return config[lid].prep + (sw * config[lid].wissel);
+  }, [bunkers, config]);
+
+  const getScheduledStartsForLine = (list: Order[], lid: LineId): Date[] => {
+    const starts: Date[] = [];
+    const cfg = config[lid];
+    const lineBunkers = bunkers[lid];
+    const lineTimingCfg = lineTiming[lid];
+    const baseDayStart = timeStringToMinutes(lineTimingCfg?.dayStart || '05:00', 5 * 60);
+    const firstOrderStart = timeStringToMinutes(lineTimingCfg?.firstOrderStart || '05:15', baseDayStart + 15);
+    const speed = LINES[lid].speed;
+    let current = 0;
+    let nextAllowedBagProdStart: number | null = null;
+
+      list.forEach((order, index) => {
+        const prevOrder = index > 0 ? list[index - 1] : null;
+        const transitionMinutes = getTransitionMinutes(lid, prevOrder, order, lineBunkers);
+        const slot = rt(order, speed) + transitionMinutes;
+        let startMinutes = current;
+        const eta = normalizeEta(order.eta);
+        const etaMinutes = eta ? timeStringToMinutes(eta, baseDayStart) - baseDayStart : null;
+        if (index === 0) {
+          startMinutes = Math.max(startMinutes, firstOrderStart - baseDayStart);
+        }
+
+        if (isBagPkg(order) && nextAllowedBagProdStart !== null) {
+          startMinutes = Math.max(startMinutes, nextAllowedBagProdStart - transitionMinutes);
+        }
+
+        if (etaMinutes !== null) {
+          const windowStart = etaMinutes;
+          const windowEnd = etaMinutes + (order.status === 'arrived' ? 30 : cfg.maxWait);
+          const isFixedFirstOrder = getEffectivePriority(order) === 1 && eta === normalizeEta(lineTimingCfg?.firstOrderStart || '05:15');
+          const earliestPrepStart = windowStart - transitionMinutes;
+          const latestPrepStart = windowEnd - transitionMinutes;
+          if (isFixedFirstOrder) {
+            startMinutes = Math.max(startMinutes, windowStart);
+          } else if (earliestPrepStart > startMinutes) {
+            startMinutes = earliestPrepStart;
+          }
+          startMinutes = Math.min(startMinutes, latestPrepStart);
+        }
+
+      const dt = new Date();
+      dt.setHours(0, 0, 0, 0);
+      dt.setMinutes(baseDayStart + startMinutes);
+      starts.push(dt);
+      current = startMinutes + slot;
+
+      if (isBagPkg(order)) {
+        const bagEndMinutes = startMinutes + slot;
+        nextAllowedBagProdStart = bagEndMinutes + BAG_COOLDOWN_MINUTES;
+      }
+    });
+
+    return starts;
+  };
+
+  const planRespectsLoadWindows = useCallback((lid: LineId, planToCheck: Order[]) => {
+      const starts = getScheduledStartsForLine(planToCheck, lid);
+      for (let index = 0; index < planToCheck.length; index++) {
+        const order = planToCheck[index];
+        const eta = normalizeEta(order.eta);
+      if (!eta) continue;
+
+        const prevOrder = index > 0 ? planToCheck[index - 1] : null;
+        const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
+        const prodStart = new Date(starts[index].getTime() + transitionMinutes * 60000);
+
+        const etaMinutes = timeStringToMinutes(eta, 0);
+        const latestAllowed = etaMinutes + (order.status === 'arrived' ? 30 : config[lid].maxWait);
+        const actualMinutes = prodStart.getHours() * 60 + prodStart.getMinutes();
+        const earliestAllowed = etaMinutes;
+
+        if (actualMinutes < earliestAllowed) {
+          return false;
+        }
+
+        if (actualMinutes > latestAllowed) {
+          return false;
+        }
+      }
+    return true;
+  }, [bunkers, config]);
+
+  const isBagOrder = useCallback((order: Order | null) => order?.pkg?.toLowerCase() === 'bag', []);
+  const isBaleOrder = useCallback((order: Order | null) => order?.pkg?.toLowerCase() === 'bale', []);
+
+  const fillSimpleSingleGapWithinLine = useCallback((lid: LineId, initialPlan: Order[]) => {
+      if (initialPlan.length < 3) return initialPlan;
+
+      let workingPlan = [...initialPlan];
+      let changed = true;
+      let passes = 0;
+      const maxPasses = 3;
+      const debugEntries: GapDebugEntry[] = [];
+
+      while (changed && passes < maxPasses) {
+        changed = false;
+        passes += 1;
+        const timeline = (() => {
+          const starts = getScheduledStartsForLine(workingPlan, lid);
+          return workingPlan.map((order, index) => {
+            const startTime = starts[index];
+            const prevOrder = index > 0 ? workingPlan[index - 1] : null;
+            const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
+            const prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
+            const endTime = new Date(prodStart.getTime() + rt(order, LINES[lid].speed) * 60000);
+            return { order, startTime, prodStart, endTime };
+          });
+        })();
+
+        for (let i = 0; i < timeline.length - 1 && !changed; i++) {
+          const current = timeline[i];
+          const next = timeline[i + 1];
+          const nextEta = normalizeEta(next.order.eta);
+          if (!nextEta) continue;
+
+          const gapMinutes = Math.round((next.startTime.getTime() - current.endTime.getTime()) / 60000);
+          if (gapMinutes < 15) continue;
+
+          let bestIdx = -1;
+          let bestRemainder = Number.POSITIVE_INFINITY;
+          let bestPrio = Number.POSITIVE_INFINITY;
+          let bestVolume = -1;
+          let bestFilledMinutes = -1;
+          let bestUtilization = -1;
+          let fallbackIdx = -1;
+          let fallbackFilledMinutes = -1;
+          let fallbackVolume = -1;
+          let fallbackRemainder = Number.POSITIVE_INFINITY;
+          const candidateDebug: GapDebugCandidate[] = [];
+
+          const evaluateGapCombination = (
+            planState: Order[],
+            afterIndex: number,
+            targetOrderId: number,
+            depthRemaining: number
+          ): { fill: number; picks: number[]; volume: number; remainder: number } => {
+            const starts = getScheduledStartsForLine(planState, lid);
+            const targetIndex = planState.findIndex(o => o.id === targetOrderId);
+            if (targetIndex <= afterIndex || targetIndex < 0) {
+              return { fill: 0, picks: [], volume: 0, remainder: 0 };
+            }
+
+            const afterOrder = planState[afterIndex];
+            const afterStart = starts[afterIndex];
+            const prevOrder = afterIndex > 0 ? planState[afterIndex - 1] : null;
+            const afterTransitionMinutes = getTransitionMinutes(lid, prevOrder, afterOrder);
+            const afterProdStart = new Date(afterStart.getTime() + afterTransitionMinutes * 60000);
+            const afterEnd = new Date(afterProdStart.getTime() + rt(afterOrder, LINES[lid].speed) * 60000);
+            const targetStart = starts[targetIndex];
+            const localGapMinutes = Math.round((targetStart.getTime() - afterEnd.getTime()) / 60000);
+
+            if (localGapMinutes < 15 || depthRemaining <= 0) {
+              return {
+                fill: 0,
+                picks: [],
+                volume: 0,
+                remainder: Math.max(localGapMinutes, 0)
+              };
+            }
+
+            const lookahead =
+              localGapMinutes >= 90 ? 22 :
+              localGapMinutes >= 60 ? 16 :
+              localGapMinutes >= 35 ? 10 :
+              6;
+
+            const candidateIndexes: number[] = [];
+            for (let idx = afterIndex + 1; idx < planState.length && candidateIndexes.length < lookahead; idx++) {
+              const candidate = planState[idx];
+              if (candidate.id === targetOrderId) continue;
+              if (candidate.status === 'running') continue;
+              candidateIndexes.push(idx);
+            }
+
+            let bestCombo = {
+              fill: 0,
+              picks: [] as number[],
+              volume: 0,
+              remainder: localGapMinutes
+            };
+
+            for (const candidateIndex of candidateIndexes) {
+              const candidate = planState[candidateIndex];
+              if (candidate.pkg === 'bulk' && candidate.status !== 'arrived') continue;
+              const neededMinutes = getTransitionMinutes(lid, afterOrder, candidate) + rt(candidate, LINES[lid].speed);
+
+              if (neededMinutes > localGapMinutes) continue;
+
+              const nextPlan = [...planState];
+              const [picked] = nextPlan.splice(candidateIndex, 1);
+              nextPlan.splice(afterIndex + 1, 0, picked);
+
+              if (!planRespectsLoadWindows(lid, nextPlan)) continue;
+
+              const recursive = evaluateGapCombination(nextPlan, afterIndex + 1, targetOrderId, depthRemaining - 1);
+              const totalFill = neededMinutes + recursive.fill;
+              const totalVolume = ev(candidate) + recursive.volume;
+              const totalPicks = [candidate.id, ...recursive.picks];
+              const totalRemainder = recursive.remainder;
+
+              if (
+                totalFill > bestCombo.fill ||
+                (totalFill === bestCombo.fill && (
+                  totalVolume > bestCombo.volume ||
+                  (totalVolume === bestCombo.volume && totalRemainder < bestCombo.remainder)
+                ))
+              ) {
+                bestCombo = {
+                  fill: totalFill,
+                  picks: totalPicks,
+                  volume: totalVolume,
+                  remainder: totalRemainder
+                };
+              }
+            }
+
+            return bestCombo;
+          };
+
+          const firstLookahead =
+            gapMinutes >= 90 ? 24 :
+            gapMinutes >= 60 ? 18 :
+            12;
+          const candidateLimit = Math.min(workingPlan.length, i + 2 + firstLookahead);
+          for (let j = i + 2; j < candidateLimit; j++) {
+            const candidate = workingPlan[j];
+            if (candidate.status === 'running') continue;
+            if (candidate.pkg === 'bulk' && candidate.status !== 'arrived') continue;
+
+            const neededMinutes = getTransitionMinutes(lid, current.order, candidate) + rt(candidate, LINES[lid].speed);
+
+            if (neededMinutes <= gapMinutes) {
+              const nextPlan = [...workingPlan];
+              const [picked] = nextPlan.splice(j, 1);
+              nextPlan.splice(i + 1, 0, picked);
+
+              const valid = planRespectsLoadWindows(lid, nextPlan);
+              if (valid) {
+                const remainder = gapMinutes - neededMinutes;
+                const effPrio = getEffectivePriority(candidate);
+                const volume = ev(candidate);
+                const firstFillUtilization = gapMinutes > 0 ? neededMinutes / gapMinutes : 0;
+                const tooSmallFirstFill = gapMinutes >= 60 && firstFillUtilization < 0.45;
+                const combo = evaluateGapCombination(nextPlan, i + 1, next.order.id, gapMinutes >= 90 ? 3 : 2);
+                const filledMinutes = neededMinutes + combo.fill;
+
+                candidateDebug.push({
+                  orderId: candidate.id,
+                  customer: candidate.customer,
+                  neededMinutes,
+                  filledMinutes,
+                  volume,
+                  remainder,
+                  valid: !tooSmallFirstFill,
+                  reason: tooSmallFirstFill ? 'eerste vulling te klein voor groot gat' : `prio ${effPrio}`
+                });
+
+                const utilization = gapMinutes > 0 ? filledMinutes / gapMinutes : 0;
+                const minUtilization = gapMinutes >= 45 ? 0.6 : 0;
+
+                if (
+                  filledMinutes > fallbackFilledMinutes ||
+                  (filledMinutes === fallbackFilledMinutes && (
+                    volume > fallbackVolume ||
+                    (volume === fallbackVolume && remainder < fallbackRemainder)
+                  ))
+                ) {
+                  fallbackIdx = j;
+                  fallbackFilledMinutes = filledMinutes;
+                  fallbackVolume = volume;
+                  fallbackRemainder = remainder;
+                }
+
+                if (tooSmallFirstFill) {
+                  continue;
+                }
+
+                if (
+                  utilization >= minUtilization && (
+                    utilization > bestUtilization + 0.0001 ||
+                    (Math.abs(utilization - bestUtilization) <= 0.0001 && (
+                      filledMinutes > bestFilledMinutes ||
+                      (filledMinutes === bestFilledMinutes && (
+                        effPrio < bestPrio ||
+                        (effPrio === bestPrio && (
+                          volume > bestVolume ||
+                          (volume === bestVolume && remainder < bestRemainder)
+                        ))
+                      ))
+                    ))
+                  )
+                ) {
+                  bestUtilization = utilization;
+                  bestPrio = effPrio;
+                  bestFilledMinutes = filledMinutes;
+                  bestVolume = volume;
+                  bestRemainder = remainder;
+                  bestIdx = j;
+                }
+              } else {
+                candidateDebug.push({
+                  orderId: candidate.id,
+                  customer: candidate.customer,
+                  neededMinutes,
+                  filledMinutes: neededMinutes,
+                  volume: ev(candidate),
+                  remainder: gapMinutes - neededMinutes,
+                  valid: false,
+                  reason: 'vensterconflict'
+                });
+              }
+            } else {
+              candidateDebug.push({
+                orderId: candidate.id,
+                customer: candidate.customer,
+                neededMinutes,
+                filledMinutes: neededMinutes,
+                volume: ev(candidate),
+                remainder: gapMinutes - neededMinutes,
+                valid: false,
+                reason: 'past niet in gat'
+              });
+            }
+          }
+
+          if (bestIdx < 0 && fallbackIdx >= 0) {
+            bestIdx = fallbackIdx;
+          }
+
+          debugEntries.push({
+            line: lid,
+            afterOrderId: current.order.id,
+            beforeOrderId: next.order.id,
+            gapMinutes,
+            chosenOrderId: bestIdx >= 0 ? workingPlan[bestIdx].id : null,
+            candidates: candidateDebug.slice(0, 5)
+          });
+
+          if (bestIdx >= 0) {
+            const nextPlan = [...workingPlan];
+            const [picked] = nextPlan.splice(bestIdx, 1);
+            nextPlan.splice(i + 1, 0, picked);
+            if (planRespectsLoadWindows(lid, nextPlan)) {
+              workingPlan = nextPlan;
+              changed = true;
+            }
+          }
+        }
+      }
+
+      if (debugEntries.length > 0) {
+        setGapDebug(prev => [...prev.filter(entry => entry.line !== lid), ...debugEntries]);
+      }
+
+      return workingPlan;
+    }, [bunkers, config, getScheduledStartsForLine, planRespectsLoadWindows]);
+
+  function getFutureBlockFitBonus(plan: Order[], insertIndex: number, lid: LineId) {
+    const candidate = plan[insertIndex];
+    if (!candidate) return 0;
+
+    const nextOrders = plan.slice(insertIndex + 1, insertIndex + 3);
+    if (nextOrders.length === 0) return 0;
+
+    let bonus = 0;
+    let futureLargeCount = 0;
+
+    nextOrders.forEach((futureOrder, futureOffset) => {
+      const proximityWeight = futureOffset === 0 ? 0.55 : 0.25;
+      bonus += getContentClusterBonus(candidate, futureOrder, lid) * proximityWeight;
+
+      const futureMetrics = getOrderContentMetrics(candidate, futureOrder, lid);
+      if (futureMetrics.totalBulkLike > 0) {
+        const overlapRatio = futureMetrics.prevOverlap / futureMetrics.totalBulkLike;
+        if (overlapRatio >= 0.75) bonus += 22000;
+        else if (overlapRatio >= 0.5) bonus += 12000;
+      }
+
+      if (ev(futureOrder) >= LARGE_ORDER_M3) futureLargeCount += 1;
+      if (candidate.rit && futureOrder.rit && candidate.rit === futureOrder.rit) {
+        bonus += 12000;
+      }
+    });
+
+    const candidateIsLarge = ev(candidate) >= LARGE_ORDER_M3;
+    if (candidateIsLarge && futureLargeCount >= 1) {
+      bonus += futureLargeCount >= 2 ? 55000 : 28000;
+    }
+
+    if (!candidateIsLarge && futureLargeCount >= 2) {
+      bonus -= 45000;
+    }
+
+    return bonus;
+  }
+
+  const fillQuickGapWithinLine = useCallback((lid: LineId, initialPlan: Order[]) => {
+    if (initialPlan.length < 3) return initialPlan;
+
+    const workingPlan = [...initialPlan];
+    let changed = true;
+    let passes = 0;
+    const maxPasses = 4;
+
+    while (changed && passes < maxPasses) {
+      changed = false;
+      passes += 1;
+
+      const starts = getScheduledStartsForLine(workingPlan, lid);
+      const timeline = workingPlan.map((order, index) => {
+        const startTime = starts[index];
+        const prevOrder = index > 0 ? workingPlan[index - 1] : null;
+        const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
+        const prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
+        const endTime = new Date(prodStart.getTime() + rt(order, LINES[lid].speed) * 60000);
+        return { order, startTime, prodStart, endTime };
+      });
+
+      for (let i = 0; i < timeline.length - 1 && !changed; i++) {
+        const current = timeline[i];
+        const next = timeline[i + 1];
+        const gapMinutes = Math.round((next.startTime.getTime() - current.endTime.getTime()) / 60000);
+        if (gapMinutes < 15) continue;
+
+        const candidateLimit = workingPlan.length;
+        const prioritizeBaleAfterBag = isBagOrder(current.order);
+        const hasBaleCandidate = prioritizeBaleAfterBag && workingPlan
+          .slice(i + 2, candidateLimit)
+          .some(candidate => candidate.status !== 'running' && candidate.pkg !== 'bulk' && isBaleOrder(candidate));
+        let bestIdx = -1;
+        let bestGapScore = Number.NEGATIVE_INFINITY;
+        const preferLargeFill = gapMinutes >= 45;
+
+        for (let j = i + 2; j < candidateLimit; j++) {
+          const candidate = workingPlan[j];
+          if (candidate.status === 'running') continue;
+          if (candidate.pkg === 'bulk') continue;
+          if (prioritizeBaleAfterBag && hasBaleCandidate && !isBaleOrder(candidate)) continue;
+          if (isBagOrder(current.order) && isBagOrder(candidate)) continue;
+
+          const neededMinutes = getTransitionMinutes(lid, current.order, candidate) + rt(candidate, LINES[lid].speed);
+          if (neededMinutes > gapMinutes) continue;
+
+          const nextPlan = [...workingPlan];
+          const [picked] = nextPlan.splice(j, 1);
+          nextPlan.splice(i + 1, 0, picked);
+          if (!planRespectsLoadWindows(lid, nextPlan)) continue;
+
+          const candidateVolume = ev(candidate);
+          const fillRatio = gapMinutes > 0 ? neededMinutes / gapMinutes : 0;
+          const remainder = Math.max(0, gapMinutes - neededMinutes);
+          const contentBonus = getContentClusterBonus(current.order, candidate, lid);
+          const windowBonus = getWindowClusterBonus(workingPlan.slice(0, i + 1), candidate, lid);
+          const materialBias = getTrailingBlockMaterialBias(workingPlan.slice(0, i + 1), candidate);
+          const comboBias = getTrailingBlockComboBias(workingPlan.slice(0, i + 1), candidate);
+          const prepContinuityBonus = getPreparationContinuityBonus(workingPlan.slice(0, i + 1), candidate, lid);
+          const futureBlockBonus = getFutureBlockFitBonus(nextPlan, i + 1, lid);
+          const baleAfterBagBoost = prioritizeBaleAfterBag && isBaleOrder(candidate) ? 50000 : 0;
+
+          const gapScore = (
+            (preferLargeFill ? candidateVolume * 900 : fillRatio * 100000) -
+            (remainder * 300) -
+            (neededMinutes * 40) +
+            contentBonus +
+            windowBonus +
+            materialBias +
+            comboBias +
+            prepContinuityBonus +
+            futureBlockBonus +
+            baleAfterBagBoost
+          );
+
+          if (gapScore > bestGapScore) {
+            bestIdx = j;
+            bestGapScore = gapScore;
+          }
+        }
+
+        if (bestIdx >= 0) {
+          const [picked] = workingPlan.splice(bestIdx, 1);
+          workingPlan.splice(i + 1, 0, picked);
+          changed = true;
+        }
+      }
+    }
+
+    return workingPlan;
+  }, [getScheduledStartsForLine, getTransitionMinutes, isBagOrder, planRespectsLoadWindows]);
+
+  const planningMaterials = useMemo(() => {
+    const mats = new Map<string, CalibrationMaterial>();
+    orders.forEach(o => {
+      o.components.forEach(c => {
+        if (c.name && !mats.has(c.name)) {
+          mats.set(c.name, {
+            name: c.name,
+            code: c.code || null,
+            calibrationValue: null
+          });
+        }
+      });
+    });
+    return Array.from(mats.values());
+  }, [orders]);
+
+  const allAvailableMaterials = useMemo(() => {
+    const merged = new Map<string, CalibrationMaterial>();
+    // Planning first
+    planningMaterials.forEach(m => merged.set(m.name, m));
+    // Calibration second (overwrites with calibration values)
+    calibrationMaterials.forEach(m => merged.set(m.name, m));
+    return Array.from(merged.values());
+  }, [planningMaterials, calibrationMaterials]);
+
+  const getEffectivePriority = (order: Order): 1 | 2 | 3 => {
+    if (order.pkg !== 'bulk') {
+      return order.prio;
+    }
+    return order.status === 'arrived' && !!normalizeEta(order.eta) ? 1 : 2;
+  };
+
+  const getOrderContentMetrics = useCallback((prev: Order | null, order: Order, lid: LineId) => {
+    const lineBunkers = bunkers[lid];
+    const prevComponents = prev?.components || [];
+    const prevByCode = new Set(prevComponents.map(c => c.code).filter(Boolean));
+    const prevByName = new Set(prevComponents.map(c => (c.name || '').toLowerCase()).filter(Boolean));
+    const bunkerByCode = new Set(lineBunkers.map(b => b.mc).filter(Boolean));
+    const bunkerByName = new Set(lineBunkers.map(b => (b.m || '').toLowerCase()).filter(Boolean));
+
+    let prevOverlap = 0;
+    let bunkerOverlap = 0;
+    let totalBulkLike = 0;
+
+    order.components.forEach(component => {
+      const unit = (component.unit || '').toUpperCase();
+      const bulkLike = unit === 'M3' || unit === 'PERC' || unit === '' || lineBunkers.some(b =>
+        (b.ms && b.ms.some(m => materialsEquivalent(m, component.name))) ||
+        (b.materialData && Object.entries(b.materialData).some(([mName, mData]) => materialsEquivalent(mName, component.name) || mData.code === component.code))
+      );
+      if (!bulkLike) return;
+
+      totalBulkLike += 1;
+      const nameKey = (component.name || '').toLowerCase();
+      const codeKey = component.code || '';
+
+      const prevMatch = (codeKey && prevByCode.has(codeKey)) || (!!nameKey && prevByName.has(nameKey));
+      const bunkerMatch = (codeKey && bunkerByCode.has(codeKey)) || (!!nameKey && bunkerByName.has(nameKey));
+
+      if (prevMatch) prevOverlap += 1;
+      if (bunkerMatch) bunkerOverlap += 1;
+    });
+
+    return {
+      prevOverlap,
+      bunkerOverlap,
+      totalBulkLike
+    };
+  }, [bunkers]);
+
+  const getContentClusterBonus = useCallback((prev: Order | null, order: Order, lid: LineId) => {
+    if (!prev) return 0;
+
+    const { prevOverlap, bunkerOverlap, totalBulkLike } = getOrderContentMetrics(prev, order, lid);
+    if (totalBulkLike <= 0) return 0;
+
+    const overlapRatio = prevOverlap / totalBulkLike;
+    const bunkerRatio = bunkerOverlap / totalBulkLike;
+    const sameRecipeBonus = prev.recipe === order.recipe ? 35000 : 0;
+    const sameCustomerRecipeFamilyBonus = prev.customer === order.customer ? 4000 : 0;
+
+    let ratioBonus = 0;
+    if (overlapRatio >= 0.8) ratioBonus += 70000;
+    else if (overlapRatio >= 0.6) ratioBonus += 42000;
+    else if (overlapRatio >= 0.4) ratioBonus += 20000;
+
+    if (bunkerRatio >= 0.8) ratioBonus += 40000;
+    else if (bunkerRatio >= 0.6) ratioBonus += 24000;
+    else if (bunkerRatio >= 0.4) ratioBonus += 10000;
+
+    return sameRecipeBonus + sameCustomerRecipeFamilyBonus + ratioBonus;
+  }, [getOrderContentMetrics]);
+
+  const getWindowClusterBonus = useCallback((plan: Order[], order: Order, lid: LineId) => {
+    const recentOrders = plan.slice(-3);
+    if (recentOrders.length === 0) return 0;
+
+    let bonus = 0;
+
+    recentOrders.forEach(previous => {
+      bonus += getContentClusterBonus(previous, order, lid) * 0.45;
+
+      if (previous.rit && order.rit && previous.rit === order.rit) {
+        bonus += 22000;
+      }
+
+      if (previous.recipe === order.recipe) {
+        bonus += 12000;
+      }
+    });
+
+    const sameRitCount = recentOrders.filter(previous => previous.rit && order.rit && previous.rit === order.rit).length;
+    if (sameRitCount >= 2) bonus += 30000;
+
+    const sameCustomerCount = recentOrders.filter(previous => previous.customer === order.customer).length;
+    if (sameCustomerCount >= 2) bonus += 6000;
+
+    return bonus;
+  }, [getContentClusterBonus]);
+
+  const getTrailingBlockMaterialBias = useCallback((plan: Order[], order: Order) => {
+    const recentOrders = plan.slice(-3);
+    if (recentOrders.length < 2) return 0;
+
+    const materialCounts = new Map<string, number>();
+    recentOrders.forEach(previous => {
+      const seen = new Set<string>();
+      previous.components.forEach(component => {
+        const key = (component.name || '').trim().toLowerCase();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        materialCounts.set(key, (materialCounts.get(key) || 0) + 1);
+      });
+    });
+
+    const dominantMaterials = Array.from(materialCounts.entries())
+      .filter(([, count]) => count >= 2)
+      .map(([name]) => name);
+
+    if (dominantMaterials.length === 0) return 0;
+
+    const orderMaterials = new Set(
+      order.components
+        .map(component => (component.name || '').trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+    let matchingDominant = 0;
+    dominantMaterials.forEach(materialName => {
+      if (orderMaterials.has(materialName)) matchingDominant += 1;
+    });
+
+    if (matchingDominant === 0) {
+      return -60000;
+    }
+
+    return matchingDominant * 28000;
+  }, []);
+
+  const getTrailingBlockComboBias = useCallback((plan: Order[], order: Order) => {
+    const recentOrders = plan.slice(-3);
+    if (recentOrders.length < 2) return 0;
+
+    const comboCounts = new Map<string, number>();
+    recentOrders.forEach(previous => {
+      const materials = Array.from(new Set(
+        previous.components
+          .map(component => (component.name || '').trim().toLowerCase())
+          .filter(Boolean)
+      )).sort();
+
+      for (let i = 0; i < materials.length; i++) {
+        for (let j = i + 1; j < materials.length; j++) {
+          const comboKey = `${materials[i]}__${materials[j]}`;
+          comboCounts.set(comboKey, (comboCounts.get(comboKey) || 0) + 1);
+        }
+      }
+    });
+
+    const dominantCombos = Array.from(comboCounts.entries())
+      .filter(([, count]) => count >= 2)
+      .map(([comboKey]) => comboKey);
+
+    if (dominantCombos.length === 0) return 0;
+
+    const orderMaterials = new Set(
+      order.components
+        .map(component => (component.name || '').trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+    let matchedCombos = 0;
+    dominantCombos.forEach(comboKey => {
+      const [left, right] = comboKey.split('__');
+      if (orderMaterials.has(left) && orderMaterials.has(right)) {
+        matchedCombos += 1;
+      }
+    });
+
+    if (matchedCombos === 0) return 0;
+
+    return matchedCombos * 36000;
+  }, []);
+
+  function getPreparationContinuityBonus(plan: Order[], order: Order, lid: LineId) {
+    const recentOrders = plan.slice(-3);
+    if (recentOrders.length === 0) return 0;
+
+    const recentPrepMaterials = new Set<string>();
+
+    recentOrders.forEach((recentOrder, index) => {
+      const previousOrder = index > 0 ? recentOrders[index - 1] : null;
+      getSwitchMaterials(previousOrder, recentOrder, bunkers[lid]).forEach(material => {
+        const key = material.trim().toLowerCase();
+        if (key) recentPrepMaterials.add(key);
+      });
+    });
+
+    const previousGlobalOrder = plan.length > 0 ? plan[plan.length - 1] : null;
+    const candidatePrepMaterials = getSwitchMaterials(previousGlobalOrder, order, bunkers[lid])
+      .map(material => material.trim().toLowerCase())
+      .filter(Boolean);
+
+    if (candidatePrepMaterials.length === 0) {
+      return recentPrepMaterials.size > 0 ? 12000 : 0;
+    }
+
+    let overlapCount = 0;
+    candidatePrepMaterials.forEach(material => {
+      if (recentPrepMaterials.has(material)) overlapCount += 1;
+    });
+
+    const overlapRatio = overlapCount / candidatePrepMaterials.length;
+    const newPrepPenalty = (candidatePrepMaterials.length - overlapCount) * 9000;
+
+    let bonus = overlapCount * 22000 - newPrepPenalty;
+
+    if (overlapRatio >= 0.8) bonus += 26000;
+    else if (overlapRatio >= 0.5) bonus += 12000;
+    else if (overlapCount === 0) bonus -= 18000;
+
+    return bonus;
+  }
+
+  const LARGE_ORDER_M3 = 70;
+  const getTrailingLargeStreak = (plan: Order[]) => {
+    let streak = 0;
+    for (let i = plan.length - 1; i >= 0; i--) {
+      if (ev(plan[i]) >= LARGE_ORDER_M3) {
+        streak += 1;
+      } else {
+        break;
+      }
+    }
+    return streak;
+  };
+
+  const buildLinePlan = useCallback((lid: LineId, sourceOrders: Order[]) => {
+    const running = sourceOrders.filter(o => o.status === 'running');
+    const pool = sourceOrders.filter(o => o.status !== 'running');
+    const plan: Order[] = [...running];
+    let current: Order | null = running.length > 0 ? running[running.length - 1] : null;
+    const fixedFirstEta = normalizeEta(lineTiming[lid]?.firstOrderStart || '05:15');
+
+    if (!current && pool.length > 0) {
+      const fixedFirstCandidates = pool
+        .map((order, index) => ({ order, index }))
+        .filter(({ order }) => getEffectivePriority(order) === 1 && normalizeEta(order.eta) === fixedFirstEta);
+
+      if (fixedFirstCandidates.length > 0) {
+        fixedFirstCandidates.sort((a, b) => {
+          const aBulkPenalty = a.order.pkg === 'bulk' ? 1 : 0;
+          const bBulkPenalty = b.order.pkg === 'bulk' ? 1 : 0;
+          if (aBulkPenalty !== bBulkPenalty) return aBulkPenalty - bBulkPenalty;
+          return ev(a.order) - ev(b.order);
+        });
+        const picked = pool.splice(fixedFirstCandidates[0].index, 1)[0];
+        plan.push(picked);
+        current = picked;
+      }
+    }
+
+    while (pool.length > 0) {
+      const arrivedEtaCandidates = pool
+        .map((order, index) => ({ order, index }))
+        .filter(({ order }) => order.status === 'arrived' && !!normalizeEta(order.eta));
+
+      if (arrivedEtaCandidates.length > 0) {
+        arrivedEtaCandidates.sort((a, b) => {
+          const etaA = etaToMins(normalizeEta(a.order.eta)) || 9999;
+          const etaB = etaToMins(normalizeEta(b.order.eta)) || 9999;
+          if (etaA !== etaB) return etaA - etaB;
+          const swA = swCount(current, a.order, bunkers[lid]);
+          const swB = swCount(current, b.order, bunkers[lid]);
+          if (swA !== swB) return swA - swB;
+          return ev(a.order) - ev(b.order);
+        });
+        const picked = pool.splice(arrivedEtaCandidates[0].index, 1)[0];
+        plan.push(picked);
+        current = picked;
+        continue;
+      }
+
+      let bestIdx = 0;
+      let bestScore = Number.POSITIVE_INFINITY;
+      const prioritizeBalePool = isBagOrder(current) && pool.some(order => isBaleOrder(order));
+
+        pool.forEach((order, index) => {
+          if (prioritizeBalePool && !isBaleOrder(order)) return;
+
+          const effPrio = getEffectivePriority(order);
+          const orderVolume = ev(order);
+          const eta = normalizeEta(order.eta);
+          const etaMins = etaToMins(eta);
+          const hasEta = etaMins !== null && etaMins !== undefined;
+          const switchCount = swCount(current, order, bunkers[lid]);
+          const contentMetrics = getOrderContentMetrics(current, order, lid);
+          const contentClusterBonus = getContentClusterBonus(current, order, lid);
+          const windowClusterBonus = getWindowClusterBonus(plan, order, lid);
+          const trailingBlockMaterialBias = getTrailingBlockMaterialBias(plan, order);
+          const trailingBlockComboBias = getTrailingBlockComboBias(plan, order);
+          const preparationContinuityBonus = getPreparationContinuityBonus(plan, order, lid);
+          const deferredBulkPenalty = order.pkg === 'bulk' && effPrio > 1 ? 50000 : 0;
+          const bagAfterBagPenalty = isBagOrder(current) && isBagOrder(order) ? 260000 : 0;
+          const baleAfterBagBonus = isBagOrder(current) && isBaleOrder(order) ? 90000 : 0;
+          const fixedFirstBonus = !current && effPrio === 1 && eta && eta === fixedFirstEta ? -200000 : 0;
+          const overlapBonus = ((contentMetrics.prevOverlap * 3500) + (contentMetrics.bunkerOverlap * 1800));
+          const unknownContentPenalty = contentMetrics.totalBulkLike > 0 && contentMetrics.prevOverlap === 0 && contentMetrics.bunkerOverlap === 0 ? 2500 : 0;
+          const recentOrders = plan.slice(-3);
+          const recentLargeCount = recentOrders.filter(previous => ev(previous) >= LARGE_ORDER_M3).length;
+          const trailingLargeStreak = getTrailingLargeStreak(plan);
+          const isLargeOrder = orderVolume >= LARGE_ORDER_M3;
+          const switchWeight =
+            trailingLargeStreak >= 2 ? 450 :
+            trailingLargeStreak === 1 ? 700 :
+            1000;
+          const largeBlockBonus = isLargeOrder
+            ? (
+                trailingLargeStreak >= 2 ? 110000 :
+                trailingLargeStreak === 1 ? 60000 :
+                recentLargeCount >= 2 ? 70000 :
+                recentLargeCount === 1 ? 35000 :
+                0
+              )
+            : 0;
+          const sameRitBonus = current && order.rit && current.rit && current.rit === order.rit ? 40000 : 0;
+          const sameCustomerLargeBonus = current && isLargeOrder && ev(current) >= LARGE_ORDER_M3 && current.customer === order.customer ? 30000 : 0;
+          const simulatedPlan = [...plan, order];
+          const simulatedStarts = getScheduledStartsForLine(simulatedPlan, lid);
+          const simulatedStart = simulatedStarts[simulatedStarts.length - 1];
+          const transitionMinutes = getTransitionMinutes(lid, current, order);
+          const candidateProdStartMinutes =
+            (simulatedStart.getHours() * 60) +
+            simulatedStart.getMinutes() +
+            transitionMinutes;
+
+          let loadWindowPenalty = 0;
+          let urgencyBonus = 0;
+          let etaCanBreakLargeBlock = false;
+          let safeSlackBonus = 0;
+          if (hasEta) {
+            const latestAllowed = etaMins! + (order.status === 'arrived' ? 30 : config[lid].maxWait);
+            const earliestAllowed = etaMins!;
+            const earlySlack = candidateProdStartMinutes - earliestAllowed;
+            const slack = latestAllowed - candidateProdStartMinutes;
+            if (earlySlack < 0) {
+              loadWindowPenalty = 200000 + (Math.abs(earlySlack) * 5000);
+            } else if (slack < 0) {
+              loadWindowPenalty = 200000 + (Math.abs(slack) * 5000);
+            } else {
+              urgencyBonus = Math.max(0, 120 - slack) * 150;
+              etaCanBreakLargeBlock = slack <= 25;
+              safeSlackBonus = slack >= 45 ? 15000 : slack >= 30 ? 7000 : 0;
+            }
+          }
+
+          const breakLargeBlockPenalty = !isLargeOrder && trailingLargeStreak >= 2 && !etaCanBreakLargeBlock ? 80000 : 0;
+
+          let score = 0;
+
+          if (plannerSort === 'customer') {
+            score =
+              effPrio * 100000 +
+              deferredBulkPenalty +
+              bagAfterBagPenalty -
+              baleAfterBagBonus +
+              breakLargeBlockPenalty +
+              0 - largeBlockBonus -
+              sameRitBonus -
+              sameCustomerLargeBonus +
+              loadWindowPenalty -
+              urgencyBonus +
+              0 - safeSlackBonus +
+              (hasEta ? 0 : 2000) +
+              switchCount * switchWeight -
+              overlapBonus -
+              contentClusterBonus +
+              0 - preparationContinuityBonus +
+              0 - windowClusterBonus -
+              trailingBlockMaterialBias -
+              trailingBlockComboBias +
+              unknownContentPenalty +
+              order.customer.toLowerCase().charCodeAt(0);
+        } else if (plannerSort === 'eta') {
+            score =
+              effPrio * 100000 +
+              deferredBulkPenalty +
+              bagAfterBagPenalty -
+              baleAfterBagBonus +
+              breakLargeBlockPenalty +
+              0 - largeBlockBonus -
+              sameRitBonus -
+              sameCustomerLargeBonus +
+              loadWindowPenalty -
+              urgencyBonus +
+              0 - safeSlackBonus +
+              (hasEta ? etaMins! : 40000) +
+              switchCount * Math.max(150, Math.round(switchWeight * 0.25)) -
+              overlapBonus -
+              contentClusterBonus +
+              0 - preparationContinuityBonus +
+              0 - windowClusterBonus -
+              trailingBlockMaterialBias -
+              trailingBlockComboBias +
+              unknownContentPenalty;
+          } else if (plannerSort === 'prio') {
+            score =
+              effPrio * 100000 +
+              deferredBulkPenalty +
+              bagAfterBagPenalty -
+              baleAfterBagBonus +
+              breakLargeBlockPenalty +
+              0 - largeBlockBonus -
+              sameRitBonus -
+              sameCustomerLargeBonus +
+              loadWindowPenalty -
+              urgencyBonus +
+              0 - safeSlackBonus +
+              switchCount * switchWeight -
+              overlapBonus -
+              contentClusterBonus +
+              0 - preparationContinuityBonus +
+              0 - windowClusterBonus -
+              trailingBlockMaterialBias -
+              trailingBlockComboBias +
+              unknownContentPenalty +
+              (hasEta ? etaMins! : 30000);
+          } else {
+            score =
+              fixedFirstBonus +
+              effPrio * 100000 +
+              deferredBulkPenalty +
+              bagAfterBagPenalty -
+              baleAfterBagBonus +
+              breakLargeBlockPenalty +
+              0 - largeBlockBonus -
+              sameRitBonus -
+              sameCustomerLargeBonus +
+              loadWindowPenalty -
+              urgencyBonus +
+              0 - safeSlackBonus +
+              switchCount * (plannerSort === 'efficiency'
+                ? (trailingLargeStreak >= 1 ? 1400 : 2600)
+                : (trailingLargeStreak >= 2 ? 900 : trailingLargeStreak === 1 ? 1200 : 1800)) +
+              unknownContentPenalty -
+              overlapBonus -
+              contentClusterBonus +
+              0 - preparationContinuityBonus +
+              0 - windowClusterBonus -
+              trailingBlockMaterialBias -
+              trailingBlockComboBias +
+              (hasEta ? etaMins! * 4 : 18000) +
+              orderVolume;
+          }
+
+        if (score < bestScore) {
+          bestScore = score;
+          bestIdx = index;
+        }
+      });
+
+      const picked = pool.splice(bestIdx, 1)[0];
+      plan.push(picked);
+      current = picked;
+    }
+
+    return plan;
+  }, [bunkers, lineTiming, plannerSort, getOrderContentMetrics, getContentClusterBonus, getWindowClusterBonus, getTrailingBlockMaterialBias, getTrailingBlockComboBias, getScheduledStartsForLine, config, getTransitionMinutes, isBagOrder, isBaleOrder]);
+
+  const activeOrders = useMemo(() => {
+    const base = orders.filter(o => o.status !== 'completed');
+    
+    if (plannerSort === 'efficiency') {
+      const sorted: Order[] = [];
+      const lineIds: LineId[] = [1, 2, 3];
+      
+      lineIds.forEach(lid => {
+        const lineOrders = base.filter(o => o.line === lid);
+        if (!lineOrders.length) return;
+        
+        // Separate Prio 1
+        const prio1 = lineOrders.filter(o => getEffectivePriority(o) === 1).sort((a, b) => (etaToMins(normalizeEta(a.eta)) || 9999) - (etaToMins(normalizeEta(b.eta)) || 9999));
+        const others = lineOrders.filter(o => getEffectivePriority(o) !== 1);
+        
+        const lineSorted: Order[] = [];
+        let current: Order | null = null;
+        
+        // Add Prio 1 first
+        prio1.forEach(o => {
+          lineSorted.push(o);
+          current = o;
+        });
+        
+        // Greedy sort for others to minimize switches
+        const remaining = [...others];
+        while (remaining.length > 0) {
+          let bestIdx = 0;
+          let minSw = 999;
+          
+          for (let i = 0; i < remaining.length; i++) {
+            const sw = swCount(current, remaining[i], bunkers[lid]);
+            if (sw < minSw) {
+              minSw = sw;
+              bestIdx = i;
+            } else if (sw === minSw) {
+              // Tie-break with ETA
+              const etaA = etaToMins(normalizeEta(remaining[i].eta)) || 9999;
+              const etaB = etaToMins(normalizeEta(remaining[bestIdx].eta)) || 9999;
+              if (etaA < etaB) bestIdx = i;
+            }
+          }
+          
+          const picked = remaining.splice(bestIdx, 1)[0];
+          lineSorted.push(picked);
+          current = picked;
+        }
+        
+        sorted.push(...lineSorted);
+      });
+      
+      return sorted;
+    }
+
+    return base.sort((a, b) => {
+      if (plannerSort === 'eta') {
+        const etaA = etaToMins(normalizeEta(a.eta)) || 9999;
+        const etaB = etaToMins(normalizeEta(b.eta)) || 9999;
+        return etaA - etaB;
+      }
+      if (plannerSort === 'prio') return getEffectivePriority(a) - getEffectivePriority(b);
+      if (plannerSort === 'customer') return a.customer.localeCompare(b.customer);
+      
+      const effA = getEffectivePriority(a);
+      const effB = getEffectivePriority(b);
+      if (effA !== effB) return effA - effB;
+      const etaA = etaToMins(normalizeEta(a.eta)) || 9999;
+      const etaB = etaToMins(normalizeEta(b.eta)) || 9999;
+      return etaA - etaB;
+    });
+  }, [orders, plannerSort, bunkers]);
+  const completedOrders = useMemo(() => orders.filter(o => o.status === 'completed'), [orders]);
+
+  const lineIds: LineId[] = [1, 2, 3];
+
+  const handleRecalculate = useCallback(() => {
+    setIsRecalculating(true);
+    setTimeout(() => {
+      try {
+        const next: Record<LineId, number[]> = { 1: [], 2: [], 3: [] };
+        lineIds.forEach(lid => {
+          const sourceOrders = activeOrders.filter(o => o.line === lid);
+          const basePlan = buildLinePlan(lid, sourceOrders);
+          const quickGapPlan = fillQuickGapWithinLine(lid, basePlan);
+          const finalPlan = planRespectsLoadWindows(lid, quickGapPlan)
+            ? quickGapPlan
+            : (planRespectsLoadWindows(lid, basePlan) ? basePlan : sourceOrders);
+          next[lid] = finalPlan.map(o => o.id);
+        });
+        setPlannedOrderIdsByLine(next);
+      } catch (error) {
+        console.error('Herbereken Schema fout', error);
+      } finally {
+        setIsRecalculating(false);
+      }
+    }, 0);
+  }, [activeOrders, buildLinePlan, fillQuickGapWithinLine, planRespectsLoadWindows]);
+
+  const lineOrdersByLine = useMemo(() => {
+    const res: Record<LineId, Order[]> = { 1: [], 2: [], 3: [] };
+    lineIds.forEach(lid => {
+      const source = activeOrders.filter(o => o.line === lid);
+      const plannedIds = plannedOrderIdsByLine?.[lid];
+      if (!plannedIds || plannedIds.length === 0) {
+        res[lid] = source;
+        return;
+      }
+      const byId = new Map(source.map(o => [o.id, o]));
+      const ordered = plannedIds.map(id => byId.get(id)).filter(Boolean) as Order[];
+      const leftovers = source.filter(o => !plannedIds.includes(o.id));
+      res[lid] = [...ordered, ...leftovers];
+    });
+    return res;
+  }, [activeOrders, plannedOrderIdsByLine]);
+
+  const plannedActiveOrders = useMemo(
+    () => lineIds.flatMap(lid => lineOrdersByLine[lid]),
+    [lineOrdersByLine]
+  );
+
+  const schedule = useMemo(() => {
+    const res: Record<LineId, Date[]> = { 1: [], 2: [], 3: [] };
+    lineIds.forEach(lid => {
+      const lineOrders = lineOrdersByLine[lid];
+      res[lid] = getScheduledStartsForLine(lineOrders, lid);
+    });
+    return res;
+  }, [lineIds, lineOrdersByLine, config, bunkers, lineTiming]);
+
+  const lineTimelineByLine = useMemo(() => {
+    const res: Record<LineId, ScheduledLineEntry[]> = { 1: [], 2: [], 3: [] };
+      lineIds.forEach(lid => {
+          const lineOrders = lineOrdersByLine[lid];
+          const starts = schedule[lid];
+          res[lid] = lineOrders.map((order, index) => {
+            const startTime = starts[index];
+            const prevOrder = index > 0 ? lineOrders[index - 1] : null;
+            const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
+            const sw = swMats.length;
+            const duration = rt(order, LINES[lid].speed);
+            const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
+            const prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
+            const endTime = new Date(prodStart.getTime() + duration * 60000);
+            return { order, startTime, prodStart, endTime, swMats, sw, duration };
+          });
+      });
+    return res;
+  }, [lineIds, lineOrdersByLine, schedule, bunkers, config, getTransitionMinutes]);
+
+  const selectedLineOrders = useMemo(
+    () => lineOrdersByLine[selectedLine],
+    [lineOrdersByLine, selectedLine]
+  );
+
+  const selectedLineTimeline = useMemo(
+    () => lineTimelineByLine[selectedLine],
+    [lineTimelineByLine, selectedLine]
+  );
+
+  const displayedCurrentOrder = useMemo(
+    () => selectedLineOrders.find(o => o.status === 'running') || null,
+    [selectedLineOrders]
+  );
+
+  const plannedOrders = useMemo(
+    () => selectedLineOrders.filter(o => o.status === 'planned' || o.status === 'arrived'),
+    [selectedLineOrders]
+  );
+
+  const displayedCurrentEntry = useMemo(() => {
+    if (!displayedCurrentOrder) return null;
+    return selectedLineTimeline.find(entry => entry.order.id === displayedCurrentOrder.id) || null;
+  }, [displayedCurrentOrder, selectedLineTimeline]);
+
+  const plannedEntries = useMemo(
+    () => selectedLineTimeline.filter(entry => entry.order.status === 'planned' || entry.order.status === 'arrived'),
+    [selectedLineTimeline]
+  );
+
+  const totalCompletedM3 = useMemo(() => 
+    completedOrders.reduce((sum, o) => sum + ev(o), 0), 
+  [completedOrders]);
+
+  const truckOrders = useMemo(() => {
+    return activeOrders
+      .filter(o => o.pkg === 'bulk')
+      .slice()
+      .sort((a, b) => {
+        const etaA = etaToMins(normalizeEta(a.eta)) || 9999;
+        const etaB = etaToMins(normalizeEta(b.eta)) || 9999;
+        if (etaA !== etaB) return etaA - etaB;
+        if (a.line !== b.line) return a.line - b.line;
+        return a.customer.localeCompare(b.customer);
+      });
+  }, [activeOrders]);
+
+  const lineDebug = useMemo(() => {
+    return {
+      total: orders.length,
+      active: activeOrders.length,
+      ml1: activeOrders.filter(o => o.line === 1).length,
+      ml2: activeOrders.filter(o => o.line === 2).length,
+      ml3: activeOrders.filter(o => o.line === 3).length,
+    };
+  }, [orders, activeOrders]);
+
+  const handleStartOrder = (id: number) => {
+    setOrders(prev => prev.map(o => o.id === id ? { ...o, status: 'running' } : o));
+    setProgress(0);
+  };
+
+  const handleFinishOrder = (id: number) => {
+    setOrders(prev => prev.map(o => o.id === id ? { ...o, status: 'completed' } : o));
+  };
+
+  const handleResetArrived = (id: number) => {
+    setOrders(prev => prev.map(o =>
+      o.id === id && o.status === 'arrived'
+        ? { ...o, status: 'planned' }
+        : o
+    ));
+  };
+
+  return (
+    <div className="flex flex-col min-h-screen bg-gray-50">
+      {/* Top Bar */}
+      <header className="h-[58px] bg-white border-b border-gray-200 flex items-center px-5 gap-0.5 shrink-0 shadow-sm z-10">
+        <div className="flex items-center gap-2.5 mr-4.5 min-w-max">
+          <div className="flex flex-col justify-center gap-px">
+            <div className="text-[13px] font-bold text-gray-700 leading-tight">Klasmann-Deilmann</div>
+            <div className="text-[11px] text-gray-500 font-medium leading-tight">Productie Planning</div>
+          </div>
+        </div>
+
+        <nav className="flex items-center gap-0.5 min-w-0 flex-wrap">
+          <button className={`nt ${view === 'operator' ? 'on' : ''}`} onClick={() => setView('operator')}>
+            <LayoutDashboard size={16} /> Operator
+          </button>
+          <button className={`nt ${view === 'planner' ? 'on' : ''}`} onClick={() => setView('planner')}>
+            <ClipboardList size={16} /> Planner
+          </button>
+          <button className={`nt ${view === 'bunkers' ? 'on' : ''}`} onClick={() => setView('bunkers')}>
+            <Database size={16} /> Bunkers
+          </button>
+          <button className={`nt ${view === 'settings' ? 'on' : ''}`} onClick={() => setView('settings')}>
+            <Settings size={16} /> Instellingen
+          </button>
+          <button className={`nt ${view === 'notifications' ? 'on' : ''}`} onClick={() => setView('notifications')}>
+            <Bell size={16} /> 
+            {notifications.filter(m => !m.gelezen).length > 0 && (
+              <span className="inline-flex items-center justify-center bg-red-500 text-white rounded-full w-4 h-4 text-[10px] font-bold ml-1">
+                {notifications.filter(m => !m.gelezen).length}
+              </span>
+            )}
+          </button>
+        </nav>
+
+        <div className="ml-auto flex items-center gap-3">
+          <div className="flex items-center gap-2 px-2.5 py-1.5 border border-gray-200 rounded-full bg-gray-50">
+            <div className="text-[11px] text-gray-400 uppercase tracking-wider">Gedraaid</div>
+            <div className="text-[13px] font-bold text-grd">{totalCompletedM3.toFixed(1)} m³</div>
+          </div>
+          <div className="text-xs text-gray-500 tabular-nums font-medium">
+            {currentTime.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-1 overflow-y-auto p-7 min-h-0">
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={view}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.2 }}
+          >
+            {view === 'operator' && (
+              <div className="max-w-6xl mx-auto">
+                <div className="flex items-center justify-between mb-4.5">
+                  <h1 className="text-xl font-bold">Operator Dashboard</h1>
+                  <div className="flex gap-2">
+                    <button 
+                      className="btn btn-p btn-sm" 
+                      onClick={laadOrders}
+                      disabled={dataSource.loading}
+                    >
+                      <RefreshCw size={14} className={dataSource.loading ? 'animate-spin' : ''} />
+                      {dataSource.loading ? 'Bezig...' : 'Sync Orders'}
+                    </button>
+                    <button 
+                      className="btn btn-s btn-sm" 
+                      onClick={laadKalibratie}
+                      disabled={dataSource.loading}
+                    >
+                      Sync Kalibratie
+                    </button>
+                    <button className="btn btn-s btn-sm text-or border-or/30 bg-orl/50">
+                      <AlertTriangle size={14} /> Storing
+                    </button>
+                    <button className="btn btn-s btn-sm text-bl border-bl/30 bg-bll/50">
+                      <Wrench size={14} /> Onderhoud
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex gap-1.5 mb-4.5">
+                  {(Object.keys(LINES) as unknown as LineId[]).map(l => {
+                    const count = activeOrders.filter(o => o.line === l).length;
+                    return (
+                      <button 
+                        key={l}
+                        className={`ltab flex items-center gap-2 ${selectedLine === l ? 'on' : ''}`}
+                        onClick={() => setSelectedLine(l)}
+                      >
+                        <span>{LINES[l].name}</span>
+                        {count > 0 && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${selectedLine === l ? 'bg-white text-gr' : 'bg-gray-100 text-gray-500'}`}>
+                            {count}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {dataSource.error && (
+                  <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4 text-sm flex items-center gap-2">
+                    <AlertTriangle size={16} />
+                    <span><b>Sync Fout:</b> {dataSource.error}</span>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 lg:grid-cols-[1fr_310px] gap-5 items-start">
+                  <div>
+                    <div className="text-[12px] font-semibold uppercase tracking-wider text-gray-400 mb-2.5">Actieve order</div>
+                    <div className={`abox ${displayedCurrentOrder ? 'has' : ''}`}>
+                      {displayedCurrentOrder ? (
+                        <div className="w-full cursor-pointer group" onClick={() => setSelectedOrderForDetail(displayedCurrentOrder)}>
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              {displayedCurrentOrder.pkg.toLowerCase() === 'bulk' ? (
+                                <TruckIcon size={18} className="text-blue-500" />
+                              ) : (
+                                <Package size={18} className="text-orange-500" />
+                              )}
+                              <div className="text-[17px] font-bold group-hover:text-blue-600 transition-colors">{displayedCurrentOrder.customer}</div>
+                            </div>
+                            <span className="badge badge-bg">{displayedCurrentOrder.status === 'running' ? '▶ Running' : 'Gepland'}</span>
+                          </div>
+                          <div className="text-[12px] text-gray-400 mt-0.5 flex items-center gap-1.5">
+                            <span>{displayedCurrentOrder.num}</span>
+                            <span className="text-gray-200">·</span>
+                            <span className="font-bold text-gray-600">{displayedCurrentOrder.recipe}</span>
+                            <span className="text-gray-200">·</span>
+                            <span className="text-[9px] font-bold uppercase tracking-wider text-gray-400">
+                              {displayedCurrentOrder.pkg.toUpperCase()}
+                            </span>
+                            <span className="text-gray-200">·</span>
+                            <span>{ev(displayedCurrentOrder).toFixed(1)} m³</span>
+                            {displayedCurrentEntry && (
+                              <>
+                                <span className="text-gray-200">·</span>
+                                <span>{fmt(displayedCurrentEntry.prodStart)} - {fmt(displayedCurrentEntry.endTime)}</span>
+                              </>
+                            )}
+                          </div>
+                          <div className="pb">
+                            <div className="pf" style={{ width: `${progress}%` }}></div>
+                          </div>
+                          <div className="flex justify-between text-[11px] text-gray-400">
+                            <span>{displayedCurrentOrder.status === 'running' ? '▶ Gestart' : 'Gepland'}</span>
+                            <span>{displayedCurrentOrder.status === 'running' ? `${Math.round(progress)}%` : (normalizeEta(displayedCurrentOrder.eta) || '—')}</span>
+                            <span>~{displayedCurrentEntry ? displayedCurrentEntry.duration.toFixed(1) : rt(displayedCurrentOrder, LINES[selectedLine].speed).toFixed(1)} min</span>
+                          </div>
+                          <div className="grid grid-cols-4 gap-2 mt-3">
+                            <div className="bg-gray-50 rounded-md p-2">
+                              <div className="text-[10px] text-gray-400 mb-0.5">Runtime</div>
+                              <div className="text-sm font-semibold">{displayedCurrentEntry ? displayedCurrentEntry.duration.toFixed(1) : rt(displayedCurrentOrder, LINES[selectedLine].speed).toFixed(1)} min</div>
+                            </div>
+                            <div className="bg-gray-50 rounded-md p-2">
+                              <div className="text-[10px] text-gray-400 mb-0.5">Volume</div>
+                              <div className="text-sm font-semibold">{ev(displayedCurrentOrder).toFixed(1)} m³</div>
+                            </div>
+                            {displayedCurrentEntry && (
+                              <div className="bg-gray-50 rounded-md p-2">
+                                <div className="text-[10px] text-gray-400 mb-0.5">Eindtijd</div>
+                                <div className="text-sm font-semibold">{fmt(displayedCurrentEntry.endTime)}</div>
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex gap-2 mt-3">
+                            <button className="btn btn-s btn-sm" onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedOrderForDetail(displayedCurrentOrder);
+                            }}>📋 Receptuur</button>
+                            {displayedCurrentOrder.status === 'running' ? (
+                              <button className="btn btn-p btn-sm" onClick={() => handleFinishOrder(displayedCurrentOrder.id)}>✓ Gereed</button>
+                            ) : (
+                              <button className="btn btn-p btn-sm" onClick={() => handleStartOrder(displayedCurrentOrder.id)}>Start</button>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-gray-400 text-sm">Geen actieve order op {LINES[selectedLine].name}</span>
+                      )}
+                    </div>
+
+                    <div className="text-[12px] font-semibold uppercase tracking-wider text-gray-400 mt-4 mb-2.5">Volgende orders</div>
+                    <div className="flex flex-col gap-2 mb-3.5">
+                      {plannedEntries.length > 0 ? plannedEntries.map((entry, i) => {
+                        const o = entry.order;
+                        const effectivePriority = getEffectivePriority(o);
+                        const canStart = !displayedCurrentOrder && (
+                          (o.pkg === 'bulk' && o.status === 'arrived') || 
+                          (o.pkg !== 'bulk' && effectivePriority === 1)
+                        );
+                        
+                        return (
+                          <div 
+                            key={o.id} 
+                            className={`ocard ocard-${effectivePriority === 1 ? 'ph' : effectivePriority === 2 ? 'pm' : 'pl'} !p-2.5 flex items-center gap-3 group cursor-pointer`}
+                            onClick={() => setSelectedOrderForDetail(o)}
+                          >
+                            <div className="flex flex-col items-center gap-1 shrink-0 w-10">
+                              <div className="w-7 h-7 bg-gray-100 rounded flex items-center justify-center text-[11px] font-bold text-gray-500">
+                                #{i + 1}
+                              </div>
+                              {o.eta && (
+                                <div className="text-[10px] font-bold bg-gray-100 px-1.5 py-0.5 rounded text-gray-600 tabular-nums">
+                                  {fmt(entry.prodStart)}
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="w-8 h-8 bg-gray-50 rounded flex items-center justify-center shrink-0">
+                              {o.pkg.toLowerCase() === 'bulk' ? (
+                                <TruckIcon size={16} className="text-blue-500" />
+                              ) : (
+                                <Package size={16} className="text-orange-500" />
+                              )}
+                            </div>
+
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-bold text-gray-900 truncate group-hover:text-blue-600 transition-colors">{o.customer}</div>
+                              <div className="text-[10px] text-gray-400 font-medium truncate uppercase tracking-wider">
+                                {o.num}
+                              </div>
+                              <div className="text-[11px] text-gray-500 mt-0.5 truncate">
+                                <span className="font-medium">{o.recipe}</span> · {ev(o).toFixed(1)} m³ · {fmt(entry.endTime)}
+                              </div>
+                            </div>
+
+                            {canStart && (
+                              <button 
+                                className="btn btn-p btn-sm shadow-sm" 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleStartOrder(o.id);
+                                }}
+                              >
+                                Start
+                              </button>
+                            )}
+                          </div>
+                        );
+                      }) : (
+                        <div className="bg-gray-50 border border-dashed border-gray-200 rounded-lg p-4 text-gray-400 text-xs text-center">
+                          Geen orders in wachtrij
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="text-[12px] font-bold uppercase tracking-wider text-gray-400 px-3.5 py-2 border-b border-gray-100">
+                        Bunker status
+                      </div>
+                      <div className="divide-y divide-gray-100">
+                        {bunkers[selectedLine].map(b => (
+                          <div 
+                            key={b.c} 
+                            className="px-3.5 py-2.5 flex items-center gap-2 cursor-pointer hover:bg-gray-50 transition-colors group"
+                            onClick={() => setSelectedBunker({ lid: selectedLine, bunker: b })}
+                          >
+                            <div className="text-xs font-bold text-gray-700 min-w-[40px]">{b.c}</div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-xs text-gray-600 truncate">{b.m || '— Leeg —'}</div>
+                              {b.calibrationValue !== null && b.calibrationValue !== undefined && (
+                                <div className="text-[9px] text-blue-500 font-bold">K: {b.calibrationValue}</div>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              {b.fx && <span className="text-[9px] font-bold text-or uppercase">Vast</span>}
+                              <Pencil size={10} className="text-gray-300 group-hover:text-blue-500 transition-colors" />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {view === 'planner' && (
+              <div className="max-w-[1600px] mx-auto">
+                <div className="flex items-center justify-between mb-4">
+                  <h1 className="text-2xl font-bold text-gray-800">Productie Planning</h1>
+                  <div className="flex gap-2">
+                    <button className="btn btn-s btn-sm" onClick={handleRecalculate} disabled={isRecalculating}>
+                      <motion.span animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: "linear" }} className="inline-block mr-1">↻</motion.span>
+                      {isRecalculating ? 'Bezig...' : 'Herbereken Schema'}
+                    </button>
+                    <button 
+                      className="btn btn-p btn-sm" 
+                      onClick={laadOrders}
+                      disabled={dataSource.loading}
+                    >
+                      {dataSource.loading ? 'Bezig...' : 'Sync Google Sheet'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Sub Tabs */}
+                <div className="flex items-center justify-between gap-4 mb-5 border-b-2 border-gray-200">
+                  <div className="flex overflow-x-auto no-scrollbar">
+                    {[
+                      { id: 'schema', lbl: 'Lijn Schema' },
+                      { id: 'wachtrij', lbl: 'Order Wachtrij' },
+                      { id: 'bunkerkaart', lbl: 'Bunker Kaart' },
+                      { id: 'vrachtwagens', lbl: '🚛 Vrachtwagenritten' },
+                      { id: 'voltooid', lbl: `Voltooid (${completedOrders.length})` }
+                    ].map(t => (
+                      <button 
+                        key={t.id}
+                        className={`px-4 py-3 text-sm font-medium border-b-2 transition-all whitespace-nowrap ${plannerTab === t.id ? 'border-gr text-gr' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                        onClick={() => setPlannerTab(t.id as any)}
+                      >
+                        {t.lbl}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-3 pb-2 shrink-0">
+                    <span className="text-xs font-semibold text-gray-400 uppercase">Sorteer</span>
+                    <select 
+                      className="fi !w-48 !py-1.5 !text-xs"
+                      value={plannerSort}
+                      onChange={(e) => setPlannerSort(e.target.value)}
+                    >
+                      <option value="default">Standaard volgorde</option>
+                      <option value="efficiency">Efficiëntie (Min. wissels)</option>
+                      <option value="eta">Laadtijd</option>
+                      <option value="prio">Prioriteit</option>
+                      <option value="customer">Klant</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Filters Row */}
+                <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+                  <div className="flex gap-1.5">
+                    {[
+                      { id: 0, lbl: 'Alle lijnen' },
+                      { id: 1, lbl: 'Menglijn 1' },
+                      { id: 2, lbl: 'Menglijn 2' },
+                      { id: 3, lbl: 'Menglijn 3' }
+                    ].map(l => (
+                      <button 
+                        key={l.id}
+                        className={`ltab ${plannerLineFilter === l.id ? 'on' : ''}`}
+                        onClick={() => setPlannerLineFilter(l.id)}
+                      >
+                        {l.lbl}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2 flex-1 max-w-md">
+                    <div className="relative flex-1">
+                      <input 
+                        className="fi !pl-10" 
+                        placeholder="Zoek op order, rit, klant of recept"
+                        value={plannerSearch}
+                        onChange={(e) => setPlannerSearch(e.target.value)}
+                      />
+                      <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+                        <ClipboardList size={16} />
+                      </div>
+                    </div>
+                    <button 
+                      onClick={() => { laadOrders(); laadKalibratie(); }}
+                      className="p-2 bg-white border border-gray-200 rounded-lg text-gray-500 hover:text-gr hover:border-gr transition-all shadow-sm"
+                      title="Synchroniseer gegevens"
+                    >
+                      <RefreshCw size={18} className={dataSource.loading ? 'animate-spin' : ''} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Sub View Content */}
+                <AnimatePresence mode="wait">
+                  <motion.div
+                    key={plannerTab}
+                    initial={{ opacity: 0, x: 10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -10 }}
+                    transition={{ duration: 0.15 }}
+                  >
+                    {plannerTab === 'schema' && (
+                      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 items-start">
+                        {(Object.keys(LINES) as unknown as LineId[])
+                          .filter(lid => plannerLineFilter === 0 || Number(lid) === plannerLineFilter)
+                          .map(lidStr => {
+                            const lid = Number(lidStr) as LineId;
+                            const lineOrders = activeOrders
+                              .filter(o => o.line === lid)
+                              .filter(o => {
+                                const s = plannerSearch.toLowerCase();
+                                return o.customer.toLowerCase().includes(s) || o.num.includes(s) || o.recipe.toLowerCase().includes(s);
+                              });
+                            const timeline = lineTimelineByLine[lid].filter(entry => {
+                              const o = entry.order;
+                              const s = plannerSearch.toLowerCase();
+                              return o.customer.toLowerCase().includes(s) || o.num.includes(s) || o.recipe.toLowerCase().includes(s);
+                            });
+                          
+                          return (
+                            <div key={lid} className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
+                              <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: LINES[lid].color }}></div>
+                                  <div className="font-bold text-gray-800">{LINES[lid].name}</div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-tighter">Cap: {LINES[lid].speed}m³/u</span>
+                                  <span className="badge badge-bg">Actief</span>
+                                </div>
+                              </div>
+                              <div className="divide-y divide-gray-100">
+                                {timeline.length > 0 ? timeline.map((entry, i) => {
+                                  const o = entry.order;
+                                  const { prodStart, endTime, swMats, sw, duration } = entry;
+                                  const isRunning = o.status === 'running';
+                                  const previousEntry = i > 0 ? timeline[i - 1] : null;
+
+                                  // Real-time progress calculation
+                                  let orderProgress = 0;
+                                  if (isRunning) {
+                                    const total = duration * 60000;
+                                    const elapsed = currentTime.getTime() - prodStart.getTime();
+                                    orderProgress = Math.max(0, Math.min(99, (elapsed / total) * 100));
+                                  }
+
+                                  return (
+                                    <React.Fragment key={o.id}>
+                                      {/* Wissel indicator if applicable */}
+                                      {(sw > 0 || (i > 0 && config[lid].prep > 0)) && (
+                                        <div className="px-4 py-2 bg-orange-50/50 flex flex-col gap-1 border-y border-orange-100/30">
+                                          <div className="flex items-center gap-2">
+                                            <div className="w-1 h-4 bg-orange-300 rounded-full"></div>
+                                            <div className="text-[10px] font-bold text-orange-600 uppercase tracking-wider">
+                                              Voorbereiding: {getTransitionMinutes(lid, previousEntry?.order || null, o)} min
+                                            </div>
+                                          </div>
+                                          {sw > 0 && (
+                                            <div className="flex flex-wrap gap-1 ml-3">
+                                              {swMats.map((m, mi) => (
+                                                <span key={mi} className="text-[9px] bg-white border border-orange-200 text-orange-700 px-1.5 py-0.5 rounded leading-none">
+                                                  + {m}
+                                                </span>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      )}
+                                      
+                                      <div className={`p-4 flex flex-col gap-2 transition-colors ${isRunning ? 'bg-grl/20 border-l-4 border-gr' : 'hover:bg-gray-50'}`}>
+                                        <div className="flex items-start gap-3">
+                                          <div className="flex flex-col items-center shrink-0 pt-0.5">
+                                            <div className="text-[11px] font-bold text-gray-800 tabular-nums leading-none">{fmt(prodStart)}</div>
+                                            <div className="w-px h-4 bg-gray-200 my-1"></div>
+                                            <div className="text-[10px] font-medium text-gray-400 tabular-nums leading-none">{fmt(endTime)}</div>
+                                          </div>
+
+                                          <div className="flex-1 min-w-0">
+                                            <div className="flex items-center justify-between gap-2 mb-0.5">
+                                              <div className="flex items-center gap-2 min-w-0">
+                                                <div className="shrink-0">
+                                                  {o.pkg.toLowerCase() === 'bulk' ? (
+                                                    <TruckIcon size={14} className="text-blue-500" />
+                                                  ) : (
+                                                    <Package size={14} className="text-orange-500" />
+                                                  )}
+                                                </div>
+                                                <div className="text-sm font-bold truncate text-gray-800">{o.customer}</div>
+                                              </div>
+                                              <div className="text-[10px] font-bold text-gray-400 tabular-nums shrink-0">#{o.num}</div>
+                                            </div>
+                                            <div className="text-[11px] text-gray-500 font-medium mb-2 flex items-center gap-1.5 flex-wrap">
+                                              <span className="cursor-pointer hover:text-blue-600 hover:underline truncate max-w-[180px]" onClick={() => setSelectedOrderForDetail(o)} title={o.recipe}>{o.recipe}</span>
+                                              <span className="text-gray-300">·</span>
+                                              <span className="tabular-nums">{ev(o).toFixed(1)} m³</span>
+                                              <span className="text-gray-300">·</span>
+                                              <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                                                {o.pkg.toUpperCase()}
+                                              </span>
+                                            </div>
+
+                                            {isRunning && (
+                                              <div className="mb-2">
+                                                <div className="flex items-center justify-between mb-1">
+                                                  <span className="text-[9px] font-bold text-gr uppercase">Productie bezig...</span>
+                                                  <span className="text-[9px] font-bold text-gr tabular-nums">{Math.round(orderProgress)}%</span>
+                                                </div>
+                                                <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden">
+                                                  <motion.div 
+                                                    className="h-full bg-gr" 
+                                                    initial={{ width: 0 }}
+                                                    animate={{ width: `${orderProgress}%` }}
+                                                  />
+                                                </div>
+                                              </div>
+                                            )}
+
+                                            <div className="flex items-center justify-between">
+                                              <div className="flex gap-1">
+                                                <span className="text-[9px] font-bold bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded uppercase">{o.rit || 'Geen rit'}</span>
+                                              </div>
+                                              <div className="text-[10px] font-bold text-gray-400">
+                                                ETA: {o.eta || '—'}
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </React.Fragment>
+                                  );
+                                }) : (
+                                  <div className="p-12 text-center flex flex-col items-center gap-2">
+                                    <div className="w-10 h-10 bg-gray-50 rounded-full flex items-center justify-center text-gray-300">
+                                      <ClipboardList size={20} />
+                                    </div>
+                                    <div className="text-xs text-gray-400 italic">Geen orders gepland voor vandaag</div>
+                                  </div>
+                                )}
+                              </div>
+                              {lid === selectedLine && gapDebug.filter(entry => entry.line === lid).length > 0 && (
+                                <div className="border-t border-amber-100 bg-amber-50/40 px-4 py-3">
+                                  <div className="text-[10px] font-bold text-amber-700 uppercase tracking-wider mb-2">Gap debug</div>
+                                  <div className="space-y-2">
+                                    {gapDebug
+                                      .filter(entry => entry.line === lid)
+                                      .slice(0, 3)
+                                      .map((entry, idx) => (
+                                        <div key={`${entry.afterOrderId}-${entry.beforeOrderId}-${idx}`} className="text-[11px] text-gray-600">
+                                          <div className="font-semibold text-gray-700">
+                                            Gat {entry.gapMinutes} min na #{entry.afterOrderId} voor #{entry.beforeOrderId}
+                                            {entry.chosenOrderId ? ` · gekozen #${entry.chosenOrderId}` : ' · geen keuze'}
+                                          </div>
+                                          <div className="space-y-1 mt-1">
+                                            {entry.candidates.map(candidate => (
+                                              <div key={candidate.orderId} className="flex flex-wrap gap-x-3 gap-y-1">
+                                                <span>#{candidate.orderId}</span>
+                                                <span>{candidate.customer}</span>
+                                                <span>{candidate.neededMinutes} min</span>
+                                                <span>{candidate.volume.toFixed(1)} m³</span>
+                                                <span>{candidate.valid ? `geldig (${candidate.filledMinutes} min gevuld)` : candidate.reason}</span>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {plannerTab === 'wachtrij' && (
+                      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
+                        <table className="wtbl">
+                          <thead>
+                            <tr>
+                              <th>OrderNr</th>
+                              <th>Rit</th>
+                              <th>Klant</th>
+                              <th>Recept</th>
+                              <th>Lijn</th>
+                              <th>Prio</th>
+                              <th>Vol (m³)</th>
+                              <th>Gepland</th>
+                              <th>Laadtijd</th>
+                              <th>Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {plannedActiveOrders
+                              .filter(o => plannerLineFilter === 0 || o.line === plannerLineFilter)
+                              .filter(o => {
+                                const s = plannerSearch.toLowerCase();
+                                return o.customer.toLowerCase().includes(s) || o.num.includes(s) || o.recipe.toLowerCase().includes(s);
+                              })
+                              .map(o => {
+                                const timelineEntry = lineTimelineByLine[o.line].find(entry => entry.order.id === o.id) || null;
+                                const prodStart = timelineEntry?.prodStart || null;
+
+                                return (
+                                  <tr key={o.id} className={o.status === 'running' ? 'bg-grl/20' : ''}>
+                                    <td className="font-bold">{o.num}</td>
+                                    <td className="text-gray-400 text-xs">{o.rit}</td>
+                                    <td className="font-medium">
+                                      <div className="flex items-center gap-2">
+                                        {o.pkg.toLowerCase() === 'bulk' ? (
+                                          <TruckIcon size={14} className="text-blue-500" />
+                                        ) : (
+                                          <Package size={14} className="text-orange-500" />
+                                        )}
+                                        {o.customer}
+                                      </div>
+                                    </td>
+                                    <td className="text-gray-500 text-xs">
+                                      <span className="cursor-pointer hover:text-blue-600 hover:underline" onClick={() => setSelectedOrderForDetail(o)}>
+                                        {o.recipe}
+                                      </span>
+                                    </td>
+                                    <td>
+                                      <span className="inline-flex items-center gap-1 text-xs font-semibold" style={{ color: LINES[o.line].color }}>
+                                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: LINES[o.line].color }}></span>
+                                        Lijn {o.line}
+                                      </span>
+                                    </td>
+                                    <td className={`text-center font-bold ${getEffectivePriority(o) === 1 ? 'text-re' : 'text-or'}`}>{getEffectivePriority(o)}</td>
+                                    <td className="font-semibold">{ev(o).toFixed(1)}</td>
+                                    <td className="font-bold text-gr tabular-nums">{prodStart ? fmt(prodStart) : '—'}</td>
+                                    <td className="font-semibold tabular-nums text-gray-400">{o.eta || '—'}</td>
+                                    <td>
+                                      <span className={`badge ${
+                                        o.status === 'running' ? 'badge-bg' : 
+                                        o.status === 'arrived' ? 'badge-bb' : 
+                                        'badge-gr'
+                                      }`}>
+                                        {o.status === 'running' ? '▶ Running' : 
+                                         o.status === 'arrived' ? 'Gearriveerd' : 
+                                         'Gepland'}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    {plannerTab === 'bunkerkaart' && (
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        {(Object.keys(LINES) as unknown as LineId[])
+                          .filter(lid => plannerLineFilter === 0 || Number(lid) === plannerLineFilter)
+                          .map(lid => (
+                            <div key={lid} className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
+                            <div className="p-3.5 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: LINES[lid].color }}></div>
+                                <div className="text-sm font-bold text-gray-800">{LINES[lid].full}</div>
+                              </div>
+                              <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                                {bunkers[lid].filter(b => b.m).length}/{bunkers[lid].length} Gevuld
+                              </span>
+                            </div>
+                            <div className="divide-y divide-gray-50">
+                              {bunkers[lid].map(b => (
+                                <div 
+                                  key={b.c} 
+                                  className="px-3.5 py-2 flex items-center gap-3 cursor-pointer hover:bg-gray-50 transition-colors"
+                                  onClick={() => setSelectedBunker({ lid, bunker: b })}
+                                >
+                                  <div className="text-[11px] font-bold text-gray-500 min-w-[36px]">{b.c}</div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="text-xs text-gray-700 truncate font-medium">{b.m || '— Leeg —'}</div>
+                                    {b.mc && <div className="text-[9px] text-gray-400 font-mono">{b.mc}</div>}
+                                    {b.calibrationValue !== null && b.calibrationValue !== undefined && (
+                                      <div className="text-[9px] text-blue-500 font-bold">K: {b.calibrationValue}</div>
+                                    )}
+                                  </div>
+                                  {b.fx && <span className="text-[9px] font-bold text-or bg-orl px-1.5 py-0.5 rounded">VAST</span>}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {plannerTab === 'vrachtwagens' && (
+                      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
+                        <table className="wtbl">
+                          <thead>
+                            <tr>
+                              <th>RitNr</th>
+                              <th>OrderNr</th>
+                              <th>Chauffeur</th>
+                              <th>Klant</th>
+                              <th>Laadtijd</th>
+                              <th>Vol (m³)</th>
+                              <th>Lijn</th>
+                              <th>Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {truckOrders.length > 0 ? (
+                              truckOrders
+                                .filter(o => plannerLineFilter === 0 || o.line === plannerLineFilter)
+                                .filter(o => {
+                                  const s = plannerSearch.toLowerCase();
+                                  return o.customer.toLowerCase().includes(s) || o.num.includes(s) || (o.driver || '').toLowerCase().includes(s) || (o.rit || '').includes(s);
+                                })
+                                .map(o => (
+                                  <tr key={o.id}>
+                                    <td className="font-bold text-re">{o.rit || '—'}</td>
+                                    <td className="font-medium">{o.num}</td>
+                                    <td className="text-gray-600 italic">{o.driver || 'Onbekend'}</td>
+                                    <td className="font-medium">
+                                      <div className="flex items-center gap-2">
+                                        {o.pkg.toLowerCase() === 'bulk' ? (
+                                          <TruckIcon size={14} className="text-blue-500" />
+                                        ) : (
+                                          <Package size={14} className="text-orange-500" />
+                                        )}
+                                        <div className="min-w-0">
+                                          <div className="truncate">{o.customer}</div>
+                                          <div className="text-[11px] text-gray-400 truncate">
+                                            Productie order {o.productionOrder || '—'} · Order {o.num} · Rit {o.rit || '—'}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </td>
+                                    <td className="font-bold tabular-nums">{o.eta || '—'}</td>
+                                    <td className="font-semibold">{o.vol} m³</td>
+                                    <td>
+                                      <span className="text-xs font-bold" style={{ color: LINES[o.line].color }}>Lijn {o.line}</span>
+                                    </td>
+                                    <td>
+                                      <div className="flex items-center gap-2">
+                                        <span className={`badge ${
+                                          o.status === 'running' ? 'badge-bg' : 
+                                          o.status === 'arrived' ? 'badge-bb' : 
+                                          'badge-gr'
+                                        }`}>
+                                        {o.status === 'running' ? 'Laden...' : 
+                                           o.status === 'arrived' ? 'Gearriveerd' : 
+                                           'Gepland'}
+                                        </span>
+                                        {o.status === 'arrived' && (
+                                          <button
+                                            className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center hover:bg-blue-100 hover:text-blue-700 transition-colors"
+                                            onClick={() => {
+                                              setArrivedOrder(o);
+                                              setArrivedTime(o.eta || '');
+                                            }}
+                                            title="Wijzig laadtijd"
+                                          >
+                                            <Pencil size={15} />
+                                          </button>
+                                        )}
+                                        {o.status === 'arrived' && (
+                                          <button
+                                            className="w-8 h-8 rounded-lg bg-gray-100 text-gray-500 flex items-center justify-center hover:bg-gray-200 hover:text-gray-700 transition-colors"
+                                            onClick={() => handleResetArrived(o.id)}
+                                            title="Zet terug naar Gepland"
+                                          >
+                                            <RefreshCw size={15} />
+                                          </button>
+                                        )}
+                                        {o.status === 'planned' && (
+                                          <button 
+                                            className="w-8 h-8 rounded-lg bg-gr text-white flex items-center justify-center hover:bg-gr/80 transition-colors"
+                                            onClick={() => {
+                                              setArrivedOrder(o);
+                                              setArrivedTime(o.eta || fmt(new Date()));
+                                            }}
+                                          >
+                                            <Check size={16} />
+                                          </button>
+                                        )}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                ))
+                            ) : (
+                              <tr>
+                                <td colSpan={8} className="p-10 text-center text-gray-400 italic">Geen vrachtwagenritten (Bulk/M3) gepland</td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    {plannerTab === 'voltooid' && (
+                      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
+                        <table className="wtbl">
+                          <thead>
+                            <tr>
+                              <th>OrderNr</th>
+                              <th>Klant</th>
+                              <th>Recept</th>
+                              <th>Lijn</th>
+                              <th>Vol (m³)</th>
+                              <th>Eenheid</th>
+                              <th>Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {completedOrders.length > 0 ? completedOrders.map(o => (
+                              <tr key={o.id}>
+                                <td className="font-bold">{o.num}</td>
+                                <td>{o.customer}</td>
+                                <td className="text-gray-500 text-xs">{o.recipe}</td>
+                                <td>Lijn {o.line}</td>
+                                <td className="font-semibold">{ev(o).toFixed(1)}</td>
+                                <td className="text-xs uppercase font-bold text-gray-500">{o.pkg === 'bulk' ? 'M3' : o.pkg === 'bag' ? 'BAG' : o.pkg === 'bale' ? 'BAL' : 'PKG'}</td>
+                                <td><span className="badge badge-bg">✓ Voltooid</span></td>
+                              </tr>
+                            )) : (
+                              <tr>
+                                <td colSpan={6} className="p-10 text-center text-gray-400 italic">Nog geen voltooide orders vandaag</td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </motion.div>
+                </AnimatePresence>
+              </div>
+            )}
+
+            {view === 'notifications' && (
+              <div className="max-w-3xl mx-auto">
+                <div className="flex items-center justify-between mb-4.5">
+                  <div>
+                    <h1 className="text-lg font-bold">Meldingen</h1>
+                    {notifications.filter(m => !m.gelezen).length > 0 && (
+                      <div className="text-xs text-gray-500 mt-1">
+                        {notifications.filter(m => !m.gelezen).length} ongelezen
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <button 
+                      className="btn btn-s btn-sm"
+                      onClick={() => setNotifications(prev => prev.map(m => ({ ...m, gelezen: true })))}
+                    >
+                      ✓ Alles gelezen
+                    </button>
+                  </div>
+                </div>
+                <div className="bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
+                  {notifications.length > 0 ? notifications.map(m => (
+                    <div 
+                      key={m.id} 
+                      className={`flex items-start gap-3.5 p-4 cursor-pointer transition-colors ${m.gelezen ? 'bg-gray-50' : 'bg-white'}`}
+                      onClick={() => setNotifications(prev => prev.map(item => item.id === m.id ? { ...item, gelezen: true } : item))}
+                    >
+                      <div className="w-9 h-9 rounded-lg bg-gray-100 border border-gray-200 flex items-center justify-center text-lg shrink-0">
+                        {m.icon}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <div className={`text-[13px] font-bold ${m.gelezen ? 'text-gray-500' : 'text-gray-800'}`}>{m.titel}</div>
+                          {m.lijn && <span className="text-[10px] font-bold bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full">ML{m.lijn}</span>}
+                          {!m.gelezen && <span className="w-1.5 h-1.5 rounded-full bg-gr shrink-0"></span>}
+                        </div>
+                        <div className="text-xs text-gray-500">{m.tekst}</div>
+                      </div>
+                      <div className="text-[10px] text-gray-400 shrink-0 text-right">
+                        {m.tijd.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })}
+                      </div>
+                    </div>
+                  )) : (
+                    <div className="p-10 text-center text-gray-400">
+                      <Bell size={32} className="mx-auto mb-3 opacity-20" />
+                      <div className="text-sm">Geen meldingen</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {view === 'bunkers' && (
+              <div className="max-w-6xl mx-auto">
+                <h1 className="text-lg font-bold mb-5">Bunkerbeheer</h1>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {(Object.keys(LINES) as unknown as LineId[]).map(lid => (
+                    <div key={lid} className="bg-white border border-gray-200 rounded-lg p-5">
+                      <div className="flex items-center justify-between mb-3.5">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: LINES[lid].color }}></div>
+                          <div className="text-[15px] font-bold">{LINES[lid].full}</div>
+                        </div>
+                        <span className="text-xs text-gray-400">
+                          {bunkers[lid].filter(b => b.m).length}/{bunkers[lid].length} gevuld
+                        </span>
+                      </div>
+                      <div className="space-y-2">
+                        {bunkers[lid].map(b => (
+                          <div 
+                            key={b.c} 
+                            className="grid grid-cols-[44px_1fr_auto] items-center gap-2 p-2 border-b border-gray-50 last:border-0 cursor-pointer hover:bg-gray-50 transition-colors rounded"
+                            onClick={() => setSelectedBunker({ lid, bunker: b })}
+                          >
+                            <div className="text-[11px] font-bold text-gray-700">{b.c}</div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-xs text-gray-600 truncate">{b.m || '— Leeg —'}</div>
+                              {b.mc && <div className="text-[9px] text-gray-400 font-mono">{b.mc}</div>}
+                              {b.calibrationValue !== null && b.calibrationValue !== undefined && (
+                                <div className="text-[9px] text-blue-500 font-bold">K: {b.calibrationValue}</div>
+                              )}
+                            </div>
+                            {b.fx && <span className="text-[9px] font-bold text-or">VAST</span>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {view === 'settings' && (
+              <div className="max-w-4xl mx-auto">
+                <h1 className="text-lg font-bold mb-4.5">Instellingen</h1>
+
+                <div className="bg-white border border-gray-200 rounded-lg p-5 mb-4">
+                  <h2 className="text-sm font-bold mb-3.5">Tijdsinstellingen & Planning</h2>
+                  <div className="space-y-5">
+                    {lineIds.map(lid => (
+                      <div key={lid} className="rounded-xl border border-gray-100 bg-gray-50/50 p-4">
+                        <div className="flex items-center gap-2 mb-4">
+                          <div className="w-3 h-3 rounded-full" style={{ backgroundColor: LINES[lid].color }}></div>
+                          <div className="font-bold text-gray-800">{LINES[lid].name}</div>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                          <div className="fg">
+                            <label className="fl">Start Dag (Voorbereiding)</label>
+                            <input
+                              type="time"
+                              className="fi"
+                              value={lineTiming[lid].dayStart}
+                              onChange={(e) => setLineTiming(prev => ({
+                                ...prev,
+                                [lid]: { ...prev[lid], dayStart: normalizeEta(e.target.value) || prev[lid].dayStart }
+                              }))}
+                            />
+                            <div className="text-[11px] text-gray-400 mt-1">Tijdstip waarop de voorbereiding begint.</div>
+                          </div>
+                          <div className="fg">
+                            <label className="fl">Start Eerste Order</label>
+                            <input
+                              type="time"
+                              className="fi"
+                              value={lineTiming[lid].firstOrderStart}
+                              onChange={(e) => setLineTiming(prev => ({
+                                ...prev,
+                                [lid]: { ...prev[lid], firstOrderStart: normalizeEta(e.target.value) || prev[lid].firstOrderStart }
+                              }))}
+                            />
+                            <div className="text-[11px] text-gray-400 mt-1">Vaste start van de eerste order op deze lijn.</div>
+                          </div>
+                          <div className="fg">
+                            <label className="fl">Wisseltijd (min)</label>
+                            <input
+                              type="number"
+                              min={0}
+                              className="fi"
+                              value={config[lid].wissel}
+                              onChange={(e) => {
+                                const next = Math.max(0, parseInt(e.target.value || '0', 10) || 0);
+                                setConfig(prev => ({
+                                  ...prev,
+                                  [lid]: { ...prev[lid], wissel: next }
+                                }));
+                              }}
+                            />
+                            <div className="text-[11px] text-gray-400 mt-1">Extra tijd per grondstofwissel.</div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                
+                <div className="bg-white border border-gray-200 rounded-lg p-5 mb-4">
+                  <h2 className="text-sm font-bold mb-3.5">Google Sheets Integratie</h2>
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="fg">
+                        <label className="fl">Planning Sheet URL</label>
+                        <div className="flex gap-2">
+                          <input 
+                            className="fi" 
+                            value={dataSource.sheetUrl} 
+                            onChange={(e) => setDataSource(prev => ({ ...prev, sheetUrl: e.target.value }))}
+                            placeholder="https://docs.google.com/spreadsheets/d/..."
+                          />
+                          <button 
+                            className="btn btn-s btn-sm shrink-0" 
+                            onClick={laadOrders}
+                            disabled={dataSource.loading}
+                          >
+                            {dataSource.loading ? '...' : 'Sync Planning'}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="fg md:col-span-2">
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="fl mb-0">Kalibratie Sheet URLs per Lijn</label>
+                          <button 
+                            className="text-[10px] font-bold text-blue-500 hover:underline uppercase"
+                            onClick={() => {
+                              setDataSource(prev => ({
+                                ...prev,
+                                calibrationUrls: {
+                                  1: 'https://docs.google.com/spreadsheets/d/17aCk5YCMQDb93r6oseFlGG04V-IRTbEEdAByGRFF0Zc/edit?gid=0',
+                                  2: 'https://docs.google.com/spreadsheets/d/17aCk5YCMQDb93r6oseFlGG04V-IRTbEEdAByGRFF0Zc/edit?gid=829830734',
+                                  3: 'https://docs.google.com/spreadsheets/d/17aCk5YCMQDb93r6oseFlGG04V-IRTbEEdAByGRFF0Zc/edit?gid=1856803997'
+                                }
+                              }));
+                            }}
+                          >
+                            Herstel Standaard URLs
+                          </button>
+                        </div>
+                        <div className="space-y-2">
+                          {(Object.keys(LINES) as unknown as LineId[]).map(lid => (
+                            <div key={lid} className="flex gap-2 items-center">
+                              <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: LINES[lid].color }}></div>
+                              <span className="text-[10px] font-bold w-12 text-gray-400 uppercase">{LINES[lid].name}</span>
+                              <input 
+                                className="fi flex-1" 
+                                value={dataSource.calibrationUrls[lid] || ''} 
+                                onChange={(e) => setDataSource(prev => ({ 
+                                  ...prev, 
+                                  calibrationUrls: { ...prev.calibrationUrls, [lid]: e.target.value } 
+                                }))}
+                                placeholder={`URL voor ${LINES[lid].name}...`}
+                              />
+                            </div>
+                          ))}
+                          <button 
+                            className="btn btn-s btn-sm w-full mt-2" 
+                            onClick={laadKalibratie}
+                            disabled={dataSource.loading}
+                          >
+                            {dataSource.loading ? 'Bezig met synchroniseren...' : 'Sync Alle Kalibraties'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="pt-2 border-t border-gray-100 flex items-center justify-between">
+                      <div className="text-xs text-gray-500 italic">
+                        Laatste sync: {dataSource.lastSync ? new Date(dataSource.lastSync).toLocaleString('nl-NL') : 'Nooit'}
+                      </div>
+                      <div className="flex gap-2">
+                        <button 
+                          className="btn btn-p btn-sm" 
+                          onClick={async () => { await laadOrders(); await laadKalibratie(); }}
+                          disabled={dataSource.loading}
+                        >
+                          {dataSource.loading ? 'Bezig...' : 'Alles synchroniseren'}
+                        </button>
+                      </div>
+                    </div>
+                    {dataSource.error && (
+                      <div className="p-3 bg-red-50 border border-red-100 rounded-md text-xs text-red-600">
+                        {dataSource.error}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-white border border-gray-200 rounded-lg p-5 mb-4">
+                  <h2 className="text-sm font-bold mb-3.5">Lijnsnelheden</h2>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {(Object.keys(LINES) as unknown as LineId[]).map(lid => (
+                      <div key={lid}>
+                        <label className="text-xs font-semibold text-gray-500 mb-1.5 block">{LINES[lid].name} (m³/min)</label>
+                        <input type="number" className="fi" defaultValue={LINES[lid].speed} step="0.1" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </motion.div>
+        </AnimatePresence>
+
+        {/* Bunker Edit Modal */}
+        <AnimatePresence>
+          {selectedBunker && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden"
+              >
+                <div className="p-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-900">Bunker Aanpassen: {selectedBunker.bunker.c}</h2>
+                    <p className="text-sm text-gray-400">Lijn {selectedBunker.lid} — {LINES[selectedBunker.lid].full}</p>
+                  </div>
+                  <button 
+                    onClick={() => setSelectedBunker(null)}
+                    className="p-2 hover:bg-gray-100 rounded-full text-gray-400 transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+                
+                <div className="p-6 max-h-[60vh] overflow-y-auto">
+                  <div className="mb-4">
+                    <label className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2 block">Huidige Grondstof</label>
+                    <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 flex items-center justify-between">
+                      <div>
+                        <div className="text-sm font-bold text-gray-800">{selectedBunker.bunker.m || '— Leeg —'}</div>
+                        {selectedBunker.bunker.mc && <div className="text-xs text-gray-400 font-mono">{selectedBunker.bunker.mc}</div>}
+                      </div>
+                      <button 
+                        className="text-xs font-bold text-re hover:underline"
+                        onClick={() => handleBunkerUpdate(selectedBunker.lid, selectedBunker.bunker.c, null)}
+                      >
+                        Leegmaken
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs font-bold text-gray-400 uppercase tracking-wider block">
+                        {showAllMaterials ? 'Alle Grondstoffen' : 'Gekalibreerde Grondstoffen'}
+                      </label>
+                      <button 
+                        onClick={() => setShowAllMaterials(!showAllMaterials)}
+                        className="text-[10px] font-bold text-blue-500 hover:underline uppercase"
+                      >
+                        {showAllMaterials ? 'Toon alleen gekalibreerd' : 'Toon alles (foutieve vulling)'}
+                      </button>
+                    </div>
+                    <div className="space-y-2 mb-6">
+                      {allAvailableMaterials
+                        .filter(m => {
+                          if (m.name === selectedBunker.bunker.m) return false;
+                          if (showAllMaterials) return true;
+                          // Default: only show calibrated/allowed materials for this bunker
+                          return selectedBunker.bunker.ms.includes(m.name);
+                        })
+                        .sort((a, b) => {
+                          const aAllowed = selectedBunker.bunker.ms.includes(a.name);
+                          const bAllowed = selectedBunker.bunker.ms.includes(b.name);
+                          
+                          if (aAllowed && !bAllowed) return -1;
+                          if (!aAllowed && bAllowed) return 1;
+                          
+                          const aInPlanning = orders.flatMap(o => o.components).some(c => c.name === a.name);
+                          const bInPlanning = orders.flatMap(o => o.components).some(c => c.name === b.name);
+                          
+                          if (aInPlanning && !bInPlanning) return -1;
+                          if (!aInPlanning && bInPlanning) return 1;
+                          
+                          return a.name.localeCompare(b.name);
+                        })
+                        .map(m => {
+                          const inPlanning = orders.flatMap(o => o.components).some(c => c.name === m.name);
+                          const isAllowed = selectedBunker.bunker.ms.includes(m.name);
+                          
+                          // Use bunker-specific data if available
+                          const specificData = selectedBunker.bunker.materialData?.[m.name];
+                          const displayCode = specificData?.code || m.code;
+                          const displayCal = specificData?.calibrationValue ?? m.calibrationValue;
+                          const hasCal = displayCal !== null;
+
+                          return (
+                            <button 
+                              key={m.name}
+                              className={`w-full p-3 text-left rounded-xl border transition-colors flex items-center justify-between ${
+                                isAllowed 
+                                  ? 'border-blue-200 bg-blue-50/50 hover:bg-blue-100' 
+                                  : 'border-gray-200 bg-white hover:bg-gray-50'
+                              }`}
+                              onClick={() => handleBunkerUpdate(selectedBunker.lid, selectedBunker.bunker.c, m.name)}
+                            >
+                              <div>
+                                <div className="text-sm font-bold text-gray-800">{m.name}</div>
+                                <div className="flex items-center gap-2 mt-0.5">
+                                  {displayCode && <span className="text-[10px] text-gray-400 font-mono">{displayCode}</span>}
+                                  {hasCal && <span className="text-[10px] text-blue-500 font-bold">K: {displayCal}</span>}
+                                </div>
+                              </div>
+                              <div className="flex gap-1">
+                                {inPlanning && <span className="text-[9px] font-bold text-gr bg-grl px-2 py-0.5 rounded-full uppercase">In Planning</span>}
+                                {isAllowed && <span className="text-[9px] font-bold text-blue-500 bg-blue-100 px-2 py-0.5 rounded-full uppercase">Gekalibreerd</span>}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      {!showAllMaterials && allAvailableMaterials.filter(m => selectedBunker.bunker.ms.includes(m.name)).length === 0 && (
+                        <div className="text-center py-6 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                          <p className="text-xs text-gray-400 mb-2">Geen specifieke grondstoffen gekalibreerd voor deze bunker.</p>
+                          <button 
+                            onClick={() => setShowAllMaterials(true)}
+                            className="text-[10px] font-bold text-blue-500 hover:underline uppercase"
+                          >
+                            Toon alle grondstoffen
+                          </button>
+                        </div>
+                      )}
+                      {allAvailableMaterials.length === 0 && (
+                        <div className="text-center py-8 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                          <p className="text-sm text-gray-400 mb-4">Geen grondstoffen gevonden.</p>
+                          <button 
+                            onClick={laadKalibratie}
+                            className="px-4 py-2 bg-blue-500 text-white text-xs font-bold rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-2 mx-auto"
+                          >
+                            <Database size={14} />
+                            Sync Kalibratie
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="p-6 bg-gray-50/50 flex justify-end">
+                  <button 
+                    className="px-6 py-2.5 rounded-xl font-bold text-gray-500 hover:bg-gray-200 transition-colors"
+                    onClick={() => setSelectedBunker(null)}
+                  >
+                    Sluiten
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Arrived Modal */}
+        <AnimatePresence>
+          {arrivedOrder && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+              >
+                <div className="p-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-900">Chauffeur gearriveerd of arriveert om:</h2>
+                    <p className="text-sm text-gray-400">{arrivedOrder.customer}</p>
+                  </div>
+                  <button 
+                    onClick={() => setArrivedOrder(null)}
+                    className="p-2 hover:bg-gray-100 rounded-full text-gray-400 transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+                
+                <div className="p-6">
+                    <p className="text-sm text-gray-500 mb-6">
+                      Vul of bevestig de laadtijd. Daarna gaat deze bulkorder naar <span className="font-bold text-gray-700">Prio 1</span> en de status naar <span className="font-bold text-gray-700">Gearriveerd</span>. Als de truck later komt, kun je hier de tijd opnieuw wijzigen of hem rechts weer terugzetten naar <span className="font-bold text-gray-700">Gepland</span>.
+                    </p>
+                  
+                  <div className="fg">
+                    <label className="fl">Laadtijd *</label>
+                    <div className="relative">
+                      <input 
+                        type="time"
+                        className="fi !pl-4 !pr-10"
+                        value={arrivedTime}
+                        onChange={(e) => setArrivedTime(e.target.value)}
+                        autoFocus
+                      />
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">
+                        <Clock size={18} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="p-6 bg-gray-50/50 flex justify-end gap-3">
+                  <button 
+                    className="px-6 py-2.5 rounded-xl font-bold text-gray-500 hover:bg-gray-200 transition-colors"
+                    onClick={() => setArrivedOrder(null)}
+                  >
+                    Annuleren
+                  </button>
+                  <button 
+                    className="px-8 py-2.5 rounded-xl font-bold text-white bg-gr hover:bg-gr/90 transition-colors"
+                    onClick={handleArrivedConfirm}
+                  >
+                    Bevestigen
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+        
+        {/* Order Detail Modal */}
+        <AnimatePresence>
+          {selectedOrderForDetail && (
+            <OrderDetailModal 
+              order={selectedOrderForDetail} 
+              onClose={() => setSelectedOrderForDetail(null)}
+              lineBunkers={bunkers[selectedOrderForDetail.line]}
+              lineConfig={config[selectedOrderForDetail.line]}
+              lineSpeed={LINES[selectedOrderForDetail.line].speed}
+            />
+          )}
+        </AnimatePresence>
+      </main>
+    </div>
+  );
+}
+
+function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }: { 
+  order: Order; 
+  onClose: () => void; 
+  lineBunkers: Bunker[];
+  lineConfig: AppConfig;
+  lineSpeed: number;
+}) {
+  const volume = ev(order);
+  const duration = rt(order, lineSpeed);
+
+  const { bulkComponents, additives } = useMemo(() => {
+    const bulkGroups = new Map<string, { name: string, code: string, value: number, unit: string }>();
+    const additiveGroups = new Map<string, { name: string, code: string, value: number, unit: string }>();
+
+    order.components.forEach(c => {
+      const unit = (c.unit || '').toUpperCase();
+      // M3 and PERC (or empty) are considered Bulk. 
+      // KG, L and other units are considered Additives (Meststoffen).
+      // Also check if the material is found in any bunker (calibration sheet)
+      const isInBunker = lineBunkers.some(b => 
+        (b.m && materialsEquivalent(b.m, c.name)) || 
+        (b.mc && b.mc === c.code) ||
+        (b.ms && b.ms.some(m => materialsEquivalent(m, c.name))) ||
+        (b.materialData && Object.entries(b.materialData).some(([mName, mData]) => materialsEquivalent(mName, c.name) || mData.code === c.code))
+      );
+      
+      const isBulk = unit === 'M3' || unit === 'PERC' || unit === '' || isInBunker;
+      const targetMap = isBulk ? bulkGroups : additiveGroups;
+      
+      const key = `${c.name}|${c.code}`;
+      const existing = targetMap.get(key);
+      if (existing) {
+        existing.value += (c.value || 0);
+      } else {
+        targetMap.set(key, { name: c.name, code: c.code, value: c.value || 0, unit: c.unit || '' });
+      }
+    });
+
+    return {
+      bulkComponents: Array.from(bulkGroups.values()),
+      additives: Array.from(additiveGroups.values())
+    };
+  }, [order.components, lineBunkers]);
+
+  const bunkerAssignments = useMemo(() => {
+    const assignments = new Map<string, Bunker | null>();
+    const usedBunkers = new Set<string>();
+
+    // 1. Prioritize bunkers that ALREADY contain the material (Match by name or code)
+    bulkComponents.forEach(c => {
+      const currentMatch = lineBunkers.find(b => 
+        !usedBunkers.has(b.c) && (
+          (b.m && (b.m === c.name || materialsEquivalent(b.m, c.name))) ||
+          (b.mc && b.mc === c.code)
+        )
+      );
+      if (currentMatch) {
+        assignments.set(`${c.name}|${c.code}`, currentMatch);
+        usedBunkers.add(currentMatch.c);
+      }
+    });
+
+    // 2. Match remaining components to bunkers that CAN contain the material (from calibration sheet)
+    bulkComponents.forEach(c => {
+      const key = `${c.name}|${c.code}`;
+      if (assignments.has(key)) return;
+
+      const possibleMatch = lineBunkers.find(b => 
+        !usedBunkers.has(b.c) && (
+          (b.ms && b.ms.some(m => m === c.name || materialsEquivalent(m, c.name))) ||
+          (b.materialData && Object.entries(b.materialData).some(([mName, mData]) => 
+            mName === c.name || materialsEquivalent(mName, c.name) || mData.code === c.code
+          ))
+        )
+      );
+      if (possibleMatch) {
+        assignments.set(key, possibleMatch);
+        usedBunkers.add(possibleMatch.c);
+      } else {
+        assignments.set(key, null);
+      }
+    });
+
+    return assignments;
+  }, [bulkComponents, lineBunkers]);
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto relative"
+      >
+        <button 
+          onClick={onClose}
+          className="absolute top-4 right-4 p-2 hover:bg-gray-100 rounded-full transition-colors z-10"
+        >
+          <X size={20} className="text-gray-400" />
+        </button>
+
+        <div className="p-8">
+          <div className="mb-6">
+            <h2 className="text-2xl font-bold text-gray-900">{order.customer}</h2>
+            <div className="text-sm text-gray-500 mt-1">
+              Opdracht {order.num} · Rit {order.rit} · Recept {order.recipe}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 mb-8">
+            <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
+              <div className="text-3xl font-bold text-gray-900">{volume.toFixed(1)} m³</div>
+              <div className="text-sm text-gray-400 mt-1">Volume</div>
+            </div>
+            <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
+              <div className="text-3xl font-bold text-gray-900">{duration.toFixed(1)} min</div>
+              <div className="text-sm text-gray-400 mt-1">Totale slottijd</div>
+            </div>
+          </div>
+
+          <div className="bg-blue-50/50 border border-blue-100 rounded-lg p-3 mb-8">
+            <div className="text-blue-600 text-sm">Receptinhoud geladen uit Google Sheets orderregels</div>
+          </div>
+
+          {bulkComponents.length > 0 && (
+            <div className="mb-8">
+              <h3 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-4">BULK GRONDSTOFFEN</h3>
+              <div className="space-y-4">
+                {bulkComponents.map((c, i) => {
+                  const unit = (c.unit || '').toUpperCase();
+                  const isPercentage = unit === 'PERC' || unit === '%';
+                  const displayValue = isPercentage ? (c.value / 100) * volume : c.value;
+                  const percentage = isPercentage ? c.value : (volume > 0 ? (c.value / volume) * 100 : 0);
+
+                  return (
+                    <div key={i} className="flex items-center justify-between">
+                      <div className="text-sm font-medium text-gray-700">{c.name}</div>
+                      <div className="flex items-center gap-4">
+                        <span className="text-xs text-gray-400 tabular-nums">{displayValue.toFixed(1)} m³</span>
+                        <div className="w-24 h-1 bg-gray-100 rounded-full overflow-hidden">
+                          <div className="h-full bg-gray-200" style={{ width: `${Math.min(100, percentage)}%` }}></div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div className="mb-8">
+            <h3 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-4">BUNKERADVIES</h3>
+            <div className="space-y-3">
+              {bulkComponents.map((c, i) => {
+                const bunker = bunkerAssignments.get(`${c.name}|${c.code}`);
+                const isMatch = !!bunker && (
+                  (bunker.m && (bunker.m === c.name || materialsEquivalent(bunker.m, c.name))) ||
+                  (bunker.mc && bunker.mc === c.code)
+                );
+                
+                return (
+                  <div 
+                    key={i} 
+                    className={`p-4 rounded-xl border flex items-center justify-between ${isMatch ? 'bg-green-50/50 border-green-100' : 'bg-orange-50/50 border-orange-100'}`}
+                  >
+                    <div>
+                      <div className="text-sm font-bold text-gray-800">{c.name} - {c.code}</div>
+                      <div className={`text-xs mt-0.5 ${isMatch ? 'text-green-600' : 'text-orange-600'}`}>
+                        {bunker 
+                          ? (isMatch ? `${bunker.c} bevat al ${bunker.m || c.name}` : `Wissel ${bunker.c} naar ${c.name}`)
+                          : `Geen bunker gevonden voor ${c.name}`
+                        }
+                      </div>
+                    </div>
+                    <div className={`text-sm font-bold ${isMatch ? 'text-green-800' : 'text-orange-800'}`}>
+                      {bunker ? bunker.c : '??'}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {additives.length > 0 && (
+            <div className="mb-8">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">MESTSTOFFEN</h3>
+                <div className="flex gap-12 text-[10px] font-bold text-gray-400 uppercase">
+                  <span className="w-16 text-right">PER M³</span>
+                  <span className="w-16 text-right">TOTAAL</span>
+                </div>
+              </div>
+              <div className="space-y-4">
+                {additives.map((c, i) => {
+                  const unit = (c.unit || '').toUpperCase();
+                  const isWeightOrLiquid = unit === 'KG' || unit === 'L';
+                  const isPercentage = unit === 'PERC' || unit === '%';
+                  
+                  // If it's KG or L, we assume the value in the sheet is the TOTAL amount.
+                  // We calculate the dosage per m3 by dividing by volume.
+                  const dosage = (isWeightOrLiquid && volume > 0) ? c.value / volume : c.value;
+                  const total = isWeightOrLiquid ? c.value : (isPercentage ? (c.value / 100) * volume : c.value * volume);
+
+                  return (
+                    <div key={i} className="flex items-center justify-between">
+                      <div className="text-sm text-gray-600">{c.name}</div>
+                      <div className="flex gap-12 text-sm font-bold">
+                        <span className="text-green-600 w-16 text-right tabular-nums">{dosage.toFixed(3)}</span>
+                        <span className="text-gray-400 w-16 text-right tabular-nums">{total.toFixed(1)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-8 pt-6 border-t border-gray-100">
+            <div>
+              <div className="text-xs text-gray-400 mb-1">Verpakking</div>
+              <div className="text-sm font-bold text-gray-900 flex items-center gap-1.5">
+                {order.pkg.toLowerCase() === 'bulk' ? (
+                  <TruckIcon size={14} className="text-blue-500" />
+                ) : (
+                  <Package size={14} className="text-orange-500" />
+                )}
+                {order.pkg.toUpperCase()}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-400 mb-1">Lijn</div>
+              <div className="text-sm font-bold text-gray-900">ML{order.line}</div>
+            </div>
+          </div>
+
+          <div className="mt-8">
+            <div className="inline-flex items-center gap-2 bg-blue-50 text-blue-600 px-4 py-2 rounded-lg text-sm font-medium">
+              <TruckIcon size={16} />
+              Laadtijd: {order.eta || '—'}
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
