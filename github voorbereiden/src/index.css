@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+@theme {
+  --color-gr: #1a7f4b;
+  --color-grl: #e8f5ee;
+  --color-grd: #156038;
+  --color-bl: #2563eb;
+  --color-bll: #eff6ff;
+  --color-or: #f59e0b;
+  --color-orl: #fffbeb;
+  --color-re: #ef4444;
+  --color-rel: #fff5f5;
+  
+  --radius-r: 8px;
+  
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+@layer base {
+  body {
+    @apply bg-gray-50 text-gray-900 font-sans antialiased min-h-screen flex flex-col;
+  }
+}
+
+@layer components {
+  .nt {
+    @apply flex items-center gap-1.5 px-4 py-1.5 rounded-md cursor-pointer text-sm font-medium text-gray-600 border border-transparent bg-none transition-colors;
+  }
+  .nt:hover { @apply bg-gray-100 text-gray-800; }
+  .nt.on { @apply bg-gr text-white border-gr; }
+
+  .ltab {
+    @apply px-4 py-1.5 rounded-full text-sm font-medium cursor-pointer border border-gray-200 bg-white text-gray-600 transition-all;
+  }
+  .ltab:hover { @apply border-gr text-gr; }
+  .ltab.on { @apply bg-gr border-gr text-white; }
+
+  .abox {
+    @apply bg-white border border-gray-200 rounded-lg p-4 mb-3.5 min-h-[90px] flex items-center justify-center;
+  }
+  .abox.has { @apply block; }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold;
+  }
+  .badge-bg { @apply bg-grl text-grd; }
+  .badge-bb { @apply bg-bll text-bl; }
+  .badge-bo { @apply bg-orl text-or; }
+  .badge-re { @apply bg-rel text-re; }
+  .badge-gr { @apply bg-gray-100 text-gray-500; }
+
+  .btn {
+    @apply inline-flex items-center gap-1 px-4 py-2 rounded-md text-sm font-semibold cursor-pointer border border-transparent transition-all;
+  }
+  .btn-p { @apply bg-gr text-white border-gr hover:bg-grd; }
+  .btn-s { @apply bg-white text-gray-700 border-gray-200 hover:bg-gray-50; }
+  .btn-sm { @apply px-3 py-1 text-xs; }
+
+  .ocard {
+    @apply bg-white border border-gray-200 rounded-lg p-3 flex items-center gap-2.5 cursor-pointer transition-all hover:border-gr;
+  }
+  .ocard-ph { @apply border-l-[3px] border-l-re; }
+  .ocard-pm { @apply border-l-[3px] border-l-or; }
+  .ocard-pl { @apply border-l-[3px] border-l-gray-200; }
+
+  .fi {
+    @apply border border-gray-300 rounded-md px-3 py-2 text-sm outline-none w-full transition-all focus:border-gr focus:ring-3 focus:ring-gr/10;
+  }
+}
+
+.pb { @apply bg-gray-100 rounded-full h-1.5 my-2.5 overflow-hidden; }
+.pf { @apply h-full bg-gr rounded-full transition-all duration-1000; }
+
+.wtbl { @apply w-full border-collapse; }
+.wtbl th { @apply text-[11px] font-semibold uppercase tracking-wider text-gray-400 px-3 py-2.5 text-left border-b-2 border-gray-200 bg-gray-50 whitespace-nowrap; }
+.wtbl td { @apply px-3 py-2.5 border-b border-gray-100 text-sm text-gray-700 align-middle; }
+.wtbl tr:hover td { @apply bg-gray-50; }
