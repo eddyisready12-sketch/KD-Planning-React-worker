@@ -1,16 +1,16 @@
 ﻿import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
-  LineId, Order, Bunker, Melding, Storing, AppConfig, Truck 
+  LineId, Order, Bunker, Melding, Storing, AppConfig, Truck, PlannerTrigger, OrderComponent 
 } from './types';
 import { useRef } from 'react';
 import { 
   LINES, DEFAULT_CFG, INITIAL_BUNKERS 
 } from './constants';
-import { 
-  fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger
+import {
+  fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides
 } from './utils';
 import { fetchOrdersFromSheet, fetchBunkersFromSheet, importOrdersFromCsvFile, CalibrationMaterial } from './services/sheetService';
-import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriverListFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow } from './services/supabaseService';
+import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriverListFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow } from './services/supabaseService';
 import { supabase } from './services/supabaseClient';
 import { 
   LayoutDashboard, ClipboardList, Database, Settings, Bell, 
@@ -45,6 +45,14 @@ type GapDebugCandidate = {
   reason: string;
 };
 
+const isBunkerExactMatchForComponent = (bunker: Bunker | null | undefined, component: OrderComponent) => {
+  if (!bunker) return false;
+  return !!(
+    (bunker.m && (bunker.m === component.name || materialsEquivalent(bunker.m, component.name))) ||
+    (bunker.mc && materialCodesEquivalent(bunker.mc, component.code))
+  );
+};
+
 type GapDebugEntry = {
   line: LineId;
   afterOrderId: number;
@@ -55,6 +63,13 @@ type GapDebugEntry = {
 };
 
 const FIXED_FIRST_ORDER_START = '05:15';
+const DEFAULT_PLANNER_TRIGGERS: PlannerTrigger[] = [
+  { key: 'priority_1_bale', label: 'Prioriteit verpakking BAL', description: '`BAL` krijgt standaard prio 1.', active: true, fieldName: 'pkg', matchValue: 'bale', actionName: 'priority_1', targetLine: 'all' },
+  { key: 'priority_1_bag', label: 'Prioriteit verpakking BAG', description: '`BAG` krijgt standaard prio 1.', active: true, fieldName: 'pkg', matchValue: 'bag', actionName: 'priority_1', targetLine: 'all' },
+  { key: 'bulk_requires_load_time', label: 'Laadtijd bulk', description: '`BULK` zonder laadtijd wordt niet direct gepland. Met `gearriveerd + laadtijd` kan bulk naar prio 1 gaan.', active: true, fieldName: 'pkg', matchValue: 'bulk', actionName: 'bulk_requires_load_time', targetLine: 'all' },
+  { key: 'first_order_start_0515', label: 'Dagstart lijn', description: 'Voorbereiding loopt standaard van `05:00` tot `05:15`. De eerste order start vanaf `05:15`.', active: true, fieldName: 'planner', matchValue: 'first_order', actionName: 'first_order_start_0515', targetLine: 'all' },
+  { key: 'material_override_0006141_over_0006142', label: 'Materiaalregel', description: '`Kokosgruis Gebufferd (0006141)` mag over `Kokosgruis gewassen (0006142)` zonder extra blokkade.', active: true, fieldName: 'material_override', matchValue: '0006141>0006142', actionName: 'allow_over_existing', targetLine: 'all' }
+];
 
 function getOrderRefLabel(order: Pick<Order, 'num' | 'productionOrder'>): string {
   return order.productionOrder
@@ -69,6 +84,70 @@ function getPkgLabel(order: Pick<Order, 'pkg'>): string {
 
 function getOrderVolumeFactor(order: Pick<Order, 'vol' | 'pkg'>): number {
   return order.vol > 0 ? (ev(order as Order) / order.vol) : 1;
+}
+
+function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function parseLocalDate(value?: string | null): Date | null {
+  const raw = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const [year, month, day] = raw.split('-').map(Number);
+  if (!year || !month || !day) return null;
+  const parsed = new Date(year, month - 1, day);
+  parsed.setHours(0, 0, 0, 0);
+  return parsed;
+}
+
+function formatPlannerDateHeading(date: Date): string {
+  return date.toLocaleDateString('nl-NL', {
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit'
+  });
+}
+
+function formatPlannerDateChip(date: Date): string {
+  return date.toLocaleDateString('nl-NL', {
+    weekday: 'short',
+    day: '2-digit',
+    month: '2-digit'
+  });
+}
+
+function formatOperatorDateTimeRange(start: Date, end: Date, currentTime: Date): string {
+  const startDate = formatLocalDate(start);
+  const endDate = formatLocalDate(end);
+  const today = formatLocalDate(currentTime);
+
+  if (startDate === today && endDate === today) {
+    return `${fmt(start)} - ${fmt(end)}`;
+  }
+
+  if (startDate === endDate) {
+    return `${formatPlannerDateChip(start)} ${fmt(start)} - ${fmt(end)}`;
+  }
+
+  return `${formatPlannerDateChip(start)} ${fmt(start)} - ${formatPlannerDateChip(end)} ${fmt(end)}`;
+}
+
+function getWeekDates(anchor: Date): Date[] {
+  const base = new Date(anchor);
+  base.setHours(0, 0, 0, 0);
+  const day = base.getDay();
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  const monday = new Date(base);
+  monday.setDate(base.getDate() + diffToMonday);
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(monday);
+    date.setDate(monday.getDate() + index);
+    date.setHours(0, 0, 0, 0);
+    return date;
+  });
 }
 
 function mergeSharedCalibrationIntoBunkers(
@@ -146,6 +225,7 @@ export default function App() {
   const [plannerLineFilter, setPlannerLineFilter] = useState<number>(0); // 0 = Alle lijnen
   const [plannerSearch, setPlannerSearch] = useState('');
   const [plannerSort, setPlannerSort] = useState('default');
+  const [plannerSelectedDate, setPlannerSelectedDate] = useState<string>(() => formatLocalDate(new Date()));
   const [chauffeurTypeFilter, setChauffeurTypeFilter] = useState<'all' | 'bulk' | 'packed'>('all');
   const [chauffeurActionFilter, setChauffeurActionFilter] = useState<'all' | 'unassigned' | 'conflicts'>('all');
   const [chauffeurSearch, setChauffeurSearch] = useState('');
@@ -164,12 +244,16 @@ export default function App() {
   const [selectedDriverName, setSelectedDriverName] = useState<string>('');
   const [draggedDriverName, setDraggedDriverName] = useState<string>('');
   const [sharedDriverNames, setSharedDriverNames] = useState<string[]>([]);
+  const [plannerTriggers, setPlannerTriggers] = useState<PlannerTrigger[]>([]);
   const [newDriverName, setNewDriverName] = useState('');
   const [driverSyncDebug, setDriverSyncDebug] = useState('');
+  const [isSavingDriver, setIsSavingDriver] = useState(false);
   const [draggedOperatorOrderId, setDraggedOperatorOrderId] = useState<number | null>(null);
   const [operatorDropTargetId, setOperatorDropTargetId] = useState<number | null>(null);
   const [isClearingOrders, setIsClearingOrders] = useState(false);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
+  const [csvImportFeedback, setCsvImportFeedback] = useState<{ type: 'ok' | 'error' | 'busy'; text: string } | null>(null);
+  const [csvImportDate, setCsvImportDate] = useState(() => formatLocalDate(new Date()));
   const [orders, setOrders] = useState<Order[]>(() => {
     const saved = localStorage.getItem('kd_orders');
     return saved ? JSON.parse(saved) : [];
@@ -236,7 +320,7 @@ export default function App() {
         if (isSupabaseConfigured()) {
           const sheetOrders = await fetchOrdersFromSheet(dataSource.sheetUrl);
           if (sheetOrders.length > 0) {
-            await writeOrdersToSupabase(sheetOrders);
+            await writeOrdersToSupabase(sheetOrders, { preserveExistingSchedule: true });
           }
           importedOrders = await fetchOrdersFromSupabase();
           sourceLabel = 'Supabase';
@@ -267,13 +351,16 @@ export default function App() {
           const keepLocalArrived = existing.status === 'arrived' && !sheetSaysArrived;
           const keepLocalEta = (keepLocalRunning || keepLocalArrived) && !!normalizeEta(existing.eta);
 
-          return {
-            ...imported,
-            status: keepLocalRunning ? 'running' : keepLocalArrived ? 'arrived' : imported.status,
-            arrived: keepLocalRunning ? existing.arrived : keepLocalArrived ? true : imported.arrived,
-            eta: keepLocalEta ? existing.eta : imported.eta,
-            driver: existing.driver || imported.driver,
-            note: existing.note || imported.note,
+        return {
+          ...imported,
+          status: keepLocalRunning ? 'running' : keepLocalArrived ? 'arrived' : imported.status,
+          arrived: keepLocalRunning ? existing.arrived : keepLocalArrived ? true : imported.arrived,
+          arrivedTime: keepLocalRunning ? (existing.arrivedTime || imported.arrivedTime) : keepLocalArrived ? (existing.arrivedTime || imported.arrivedTime) : imported.arrivedTime,
+          startedAt: keepLocalRunning ? (existing.startedAt || imported.startedAt) : imported.startedAt,
+          holdLoadTime: keepLocalRunning || keepLocalArrived ? !!existing.holdLoadTime : !!imported.holdLoadTime,
+          eta: keepLocalEta ? existing.eta : imported.eta,
+          driver: existing.driver || imported.driver,
+          note: existing.note || imported.note,
             _autoMovedReason: existing._autoMovedReason,
             _autoMovedFromLine: existing._autoMovedFromLine,
             _autoMovedToLine: existing._autoMovedToLine
@@ -340,6 +427,9 @@ export default function App() {
           ...imported,
           status: keepLocalRunning ? 'running' : keepLocalArrived ? 'arrived' : imported.status,
           arrived: keepLocalRunning ? existing.arrived : keepLocalArrived ? true : imported.arrived,
+          arrivedTime: keepLocalRunning ? (existing.arrivedTime || imported.arrivedTime) : keepLocalArrived ? (existing.arrivedTime || imported.arrivedTime) : imported.arrivedTime,
+          startedAt: keepLocalRunning ? (existing.startedAt || imported.startedAt) : imported.startedAt,
+          holdLoadTime: keepLocalRunning || keepLocalArrived ? !!existing.holdLoadTime : !!imported.holdLoadTime,
           eta: existing.eta || imported.eta,
           driver: existing.driver || imported.driver,
           note: existing.note || imported.note,
@@ -356,11 +446,12 @@ export default function App() {
   const handleLocalCsvImport = async (file: File | null) => {
     if (!file) return;
     setIsImportingCsv(true);
+    setCsvImportFeedback({ type: 'busy', text: `Bezig met importeren van ${file.name} voor ${csvImportDate}...` });
     setDataSource(prev => ({ ...prev, loading: true, error: null }));
     try {
-      const importedOrders = await importOrdersFromCsvFile(file);
+      const importedOrders = await importOrdersFromCsvFile(file, csvImportDate);
       if (isSupabaseConfigured() && importedOrders.length > 0) {
-        await writeOrdersToSupabase(importedOrders);
+        await writeOrdersToSupabase(importedOrders, { preserveExistingSchedule: true });
       }
       const finalOrders = isSupabaseConfigured() ? await fetchOrdersFromSupabase() : importedOrders;
       mergeImportedOrdersIntoState(finalOrders);
@@ -376,6 +467,7 @@ export default function App() {
         tijd: new Date(),
         gelezen: false
       }, ...prev]);
+      setCsvImportFeedback({ type: 'ok', text: `${finalOrders.length} orders succesvol geladen uit ${file.name}` });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'CSV import mislukt';
       setDataSource(prev => ({ ...prev, loading: false, error: errorMsg }));
@@ -390,6 +482,7 @@ export default function App() {
         tijd: new Date(),
         gelezen: false
       }, ...prev]);
+      setCsvImportFeedback({ type: 'error', text: errorMsg });
     } finally {
       setIsImportingCsv(false);
     }
@@ -648,17 +741,86 @@ export default function App() {
     }
   }, []);
 
+  const refreshPlannerTriggersFromSupabase = useCallback(async () => {
+    if (!isSupabaseConfigured()) return;
+    try {
+      const triggers = await fetchPlannerTriggersFromSupabase();
+      setPlannerTriggers(triggers);
+    } catch {
+      // keep default trigger view if supabase refresh fails
+    }
+  }, []);
+
+  const activePlannerTriggerRows = useMemo(
+    () => (plannerTriggers.length > 0 ? plannerTriggers : DEFAULT_PLANNER_TRIGGERS).filter(trigger => trigger.active !== false),
+    [plannerTriggers]
+  );
+
+  const priorityOnePackages = useMemo(() => {
+    return new Set(
+      activePlannerTriggerRows
+        .filter(trigger => trigger.fieldName === 'pkg' && trigger.actionName === 'priority_1')
+        .map(trigger => normalizePkg(trigger.matchValue || ''))
+        .filter(Boolean)
+    );
+  }, [activePlannerTriggerRows]);
+
+  const bulkRequiresLoadTime = useMemo(
+    () =>
+      activePlannerTriggerRows.some(
+        trigger => trigger.fieldName === 'pkg' && trigger.actionName === 'bulk_requires_load_time' && normalizePkg(trigger.matchValue || '') === 'bulk'
+      ),
+    [activePlannerTriggerRows]
+  );
+
+  const effectiveFirstOrderStart = useMemo(
+    () =>
+      activePlannerTriggerRows.some(
+        trigger => trigger.fieldName === 'planner' && trigger.actionName === 'first_order_start_0515' && (trigger.matchValue || '') === 'first_order'
+      )
+        ? '05:15'
+        : FIXED_FIRST_ORDER_START,
+    [activePlannerTriggerRows]
+  );
+
+  const materialOverridePairs = useMemo(
+    () =>
+      activePlannerTriggerRows
+        .filter(trigger => trigger.fieldName === 'material_override' && trigger.actionName === 'allow_over_existing')
+        .map(trigger => String(trigger.matchValue || '').trim())
+        .filter(value => value.includes('>'))
+        .map(value => {
+          const [requestedCode, existingCode] = value.split('>');
+          return {
+            requestedCode: requestedCode.trim(),
+            existingCode: existingCode.trim()
+          };
+        })
+        .filter(pair => !!pair.requestedCode && !!pair.existingCode),
+    [activePlannerTriggerRows]
+  );
+
+  useEffect(() => {
+    setRuntimeMaterialOverrides(materialOverridePairs);
+  }, [materialOverridePairs]);
+
+  const getOrderLoadReferenceTime = useCallback(
+    (order: Order) => normalizeEta(order.status === 'arrived' ? (order.arrivedTime || order.eta) : order.eta),
+    []
+  );
+
   // Initial Sync
   useEffect(() => {
     laadOrders();
     laadKalibratie();
-  }, []);
+    refreshPlannerTriggersFromSupabase();
+  }, [refreshPlannerTriggersFromSupabase]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
       if (document.hidden || dataSource.loading) return;
       laadOrders({ silent: true });
-    }, 60000);
+    }, 900000);
 
     return () => window.clearInterval(interval);
   }, [dataSource.loading, dataSource.sheetUrl]);
@@ -678,12 +840,17 @@ export default function App() {
         { event: '*', schema: 'public', table: 'shared_bunker_materials' },
         refreshBunkersFromSupabase
       )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'shared_triggers' },
+        refreshPlannerTriggersFromSupabase
+      )
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [refreshBunkersFromSupabase]);
+  }, [refreshBunkersFromSupabase, refreshPlannerTriggersFromSupabase]);
 
   useEffect(() => {
     if (!isSupabaseConfigured() || !supabase) return;
@@ -755,7 +922,25 @@ export default function App() {
       try {
         const sharedOrders = await fetchOrdersFromSupabase();
         if (sharedOrders.length > 0) {
-          setOrders(sharedOrders);
+          setOrders(prev => {
+            const orderKey = (o: Order) => `${o.num}|${o.rit}|${o.recipe}|${o.line}`;
+            const prevByKey = new Map(prev.map(o => [orderKey(o), o]));
+            return sharedOrders.map(order => {
+              const existing = prevByKey.get(orderKey(order));
+              if (!existing) return order;
+              const keepLocalRunning = existing.status === 'running' && !order.startedAt;
+              const keepLocalArrived = existing.status === 'arrived' && !order.arrivedTime;
+              return {
+                ...order,
+                status: keepLocalRunning ? existing.status : order.status,
+                arrived: keepLocalRunning ? existing.arrived : keepLocalArrived ? existing.arrived : order.arrived,
+                arrivedTime: keepLocalRunning ? (existing.arrivedTime || order.arrivedTime) : keepLocalArrived ? (existing.arrivedTime || order.arrivedTime) : order.arrivedTime,
+                startedAt: keepLocalRunning ? (existing.startedAt || order.startedAt) : order.startedAt,
+                holdLoadTime: keepLocalRunning || keepLocalArrived ? !!existing.holdLoadTime : !!order.holdLoadTime,
+                eta: keepLocalRunning ? (existing.eta || order.eta) : order.eta
+              };
+            });
+          });
         }
       } catch {
         // keep current local state if realtime refresh fails
@@ -794,6 +979,7 @@ export default function App() {
   }, [refreshIssuesFromSupabase]);
   const [arrivedOrder, setArrivedOrder] = useState<Order | null>(null);
   const [arrivedTime, setArrivedTime] = useState('');
+  const [arrivedHoldLoadTime, setArrivedHoldLoadTime] = useState(false);
   const [selectedBunker, setSelectedBunker] = useState<{ lid: LineId, bunker: Bunker } | null>(null);
   const [calibrationMaterials, setCalibrationMaterials] = useState<CalibrationMaterial[]>([]);
   const [showAllMaterials, setShowAllMaterials] = useState(false);
@@ -803,6 +989,7 @@ export default function App() {
   const [isSavingCalibration, setIsSavingCalibration] = useState(false);
   const bunkerRefreshInFlight = useRef(false);
   const issueRefreshInFlight = useRef(false);
+  const repairedRunningOrdersRef = useRef('');
 
   const handleBunkerUpdate = async (lid: LineId, bunkerCode: string, newMaterial: string | null) => {
     const lineBunkers = [...(bunkers[lid] || [])];
@@ -953,12 +1140,13 @@ export default function App() {
     if (!confirmedEta) return;
     const nextOrders = orders.map(o => 
       o.id === arrivedOrder.id 
-        ? { ...o, eta: confirmedEta, status: 'arrived' } 
+        ? { ...o, eta: o.eta, arrivedTime: confirmedEta, status: 'arrived', arrived: true, holdLoadTime: arrivedHoldLoadTime } 
         : o
     );
     await persistOrders(nextOrders, 'Order sync mislukt', arrivedOrder.line, arrivedOrder.num);
     setArrivedOrder(null);
     setArrivedTime('');
+    setArrivedHoldLoadTime(false);
   };
   const [bunkers, setBunkers] = useState<Record<LineId, Bunker[]>>(INITIAL_BUNKERS);
   const [notifications, setNotifications] = useState<Melding[]>([]);
@@ -1029,6 +1217,28 @@ export default function App() {
     }
   }
 
+  useEffect(() => {
+    const runningWithoutStart = orders.filter(order => order.status === 'running' && !order.startedAt);
+    if (runningWithoutStart.length === 0) {
+      repairedRunningOrdersRef.current = '';
+      return;
+    }
+
+    const repairKey = runningWithoutStart.map(order => `${order.id}:${order.status}`).join('|');
+    if (repairedRunningOrdersRef.current === repairKey) return;
+
+    repairedRunningOrdersRef.current = repairKey;
+    const repairedStartedAt = new Date().toISOString();
+    const nextOrders = orders.map(order =>
+      order.status === 'running' && !order.startedAt
+        ? { ...order, startedAt: repairedStartedAt }
+        : order
+    );
+
+    setOrders(nextOrders);
+    void persistOrders(nextOrders, 'Starttijd actieve order sync mislukt');
+  }, [orders]);
+
   const orderDriverNames = useMemo(() => {
     return Array.from(
       new Set(
@@ -1097,6 +1307,7 @@ export default function App() {
     if (sharedDriverNames.some(name => name.toLowerCase() === trimmed.toLowerCase())) {
       setSelectedDriverName(sharedDriverNames.find(name => name.toLowerCase() === trimmed.toLowerCase()) || trimmed);
       setNewDriverName('');
+      setDriverSyncDebug(`${trimmed} bestaat al in de centrale chauffeurslijst`);
       return;
     }
 
@@ -1106,8 +1317,14 @@ export default function App() {
     setSharedDriverNames(nextNames);
     setSelectedDriverName(trimmed);
     setNewDriverName('');
+    setIsSavingDriver(true);
+    setDriverSyncDebug(`Opslaan: ${trimmed}...`);
 
-    if (!isSupabaseConfigured()) return;
+    if (!isSupabaseConfigured()) {
+      setIsSavingDriver(false);
+      setDriverSyncDebug(`${trimmed} lokaal toegevoegd`);
+      return;
+    }
 
     try {
       await writeDriverListToSupabase(nextNames);
@@ -1130,6 +1347,7 @@ export default function App() {
       }, ...prev]);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Chauffeur toevoegen mislukt';
+      setDriverSyncDebug(`Opslaan mislukt: ${trimmed}`);
       setNotifications(prev => [{
         id: Date.now(),
         type: 'fout',
@@ -1141,6 +1359,8 @@ export default function App() {
         tijd: new Date(),
         gelezen: false
       }, ...prev]);
+    } finally {
+      setIsSavingDriver(false);
     }
   }
   const [lineTiming, setLineTiming] = useState<Record<LineId, LineTimingSettings>>(() => {
@@ -1236,8 +1456,11 @@ export default function App() {
     const lineBunkers = bunkers[lid];
     const lineTimingCfg = lineTiming[lid];
     const baseDayStart = timeStringToMinutes(lineTimingCfg?.dayStart || '05:00', 5 * 60);
-    const firstOrderStart = timeStringToMinutes(FIXED_FIRST_ORDER_START, baseDayStart + 15);
+    const firstOrderStart = timeStringToMinutes(effectiveFirstOrderStart, baseDayStart + 15);
     const speed = LINES[lid].speed;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const anchorDay = parseLocalDate(list[0]?.date) || today;
     let current = 0;
     let nextAllowedBagProdStart: number | null = null;
 
@@ -1245,12 +1468,16 @@ export default function App() {
         const prevOrder = index > 0 ? list[index - 1] : null;
         const transitionMinutes = getTransitionMinutes(lid, prevOrder, order, lineBunkers);
         const slot = rt(order, speed) + transitionMinutes;
+        const orderDay = parseLocalDate(order.date) || anchorDay;
+        const dayOffsetMinutes = Math.round((orderDay.getTime() - anchorDay.getTime()) / 86400000) * 1440;
         let startMinutes = current;
         const eta = normalizeEta(order.eta);
-        const etaMinutes = eta ? timeStringToMinutes(eta, baseDayStart) - baseDayStart : null;
+        const etaMinutes = eta ? dayOffsetMinutes + timeStringToMinutes(eta, baseDayStart) : null;
         if (index === 0) {
-          startMinutes = firstOrderStart - baseDayStart;
+          startMinutes = dayOffsetMinutes + firstOrderStart;
         }
+
+        startMinutes = Math.max(startMinutes, dayOffsetMinutes + firstOrderStart);
 
         if (isBagPkg(order) && nextAllowedBagProdStart !== null) {
           startMinutes = Math.max(startMinutes, nextAllowedBagProdStart - transitionMinutes);
@@ -1259,7 +1486,7 @@ export default function App() {
         if (etaMinutes !== null && index !== 0) {
           const windowStart = etaMinutes;
           const windowEnd = etaMinutes + (order.status === 'arrived' ? 30 : cfg.maxWait);
-          const isFixedFirstOrder = getEffectivePriority(order) === 1 && eta === FIXED_FIRST_ORDER_START;
+          const isFixedFirstOrder = getEffectivePriority(order) === 1 && eta === effectiveFirstOrderStart;
           const earliestPrepStart = windowStart - transitionMinutes;
           const latestPrepStart = windowEnd - transitionMinutes;
           if (isFixedFirstOrder) {
@@ -1270,9 +1497,11 @@ export default function App() {
           startMinutes = Math.min(startMinutes, latestPrepStart);
         }
 
-      const dt = new Date();
+      startMinutes = Math.max(startMinutes, dayOffsetMinutes + firstOrderStart);
+
+      const dt = new Date(anchorDay);
       dt.setHours(0, 0, 0, 0);
-      dt.setMinutes(baseDayStart + startMinutes);
+      dt.setMinutes(startMinutes);
       starts.push(dt);
       current = startMinutes + slot;
 
@@ -1284,6 +1513,61 @@ export default function App() {
 
     return starts;
   };
+
+  const getLinePlanCursor = useCallback((list: Order[], lid: LineId) => {
+    const cfg = config[lid];
+    const lineBunkers = bunkers[lid];
+    const lineTimingCfg = lineTiming[lid];
+    const baseDayStart = timeStringToMinutes(lineTimingCfg?.dayStart || '05:00', 5 * 60);
+    const firstOrderStart = timeStringToMinutes(effectiveFirstOrderStart, baseDayStart + 15);
+    const speed = LINES[lid].speed;
+    let current = 0;
+    let nextAllowedBagProdStart: number | null = null;
+
+    list.forEach((order, index) => {
+      const prevOrder = index > 0 ? list[index - 1] : null;
+      const transitionMinutes = getTransitionMinutes(lid, prevOrder, order, lineBunkers);
+      const slot = rt(order, speed) + transitionMinutes;
+      let startMinutes = current;
+      const eta = normalizeEta(order.eta);
+      const etaMinutes = eta ? timeStringToMinutes(eta, baseDayStart) - baseDayStart : null;
+
+      if (index === 0) {
+        startMinutes = firstOrderStart - baseDayStart;
+      }
+
+      if (isBagPkg(order) && nextAllowedBagProdStart !== null) {
+        startMinutes = Math.max(startMinutes, nextAllowedBagProdStart - transitionMinutes);
+      }
+
+      if (etaMinutes !== null && index !== 0) {
+        const windowStart = etaMinutes;
+        const windowEnd = etaMinutes + (order.status === 'arrived' ? 30 : cfg.maxWait);
+        const isFixedFirstOrder = getEffectivePriority(order) === 1 && eta === effectiveFirstOrderStart;
+        const earliestPrepStart = windowStart - transitionMinutes;
+        const latestPrepStart = windowEnd - transitionMinutes;
+        if (isFixedFirstOrder) {
+          startMinutes = Math.max(startMinutes, windowStart);
+        } else if (earliestPrepStart > startMinutes) {
+          startMinutes = earliestPrepStart;
+        }
+        startMinutes = Math.min(startMinutes, latestPrepStart);
+      }
+
+      current = startMinutes + slot;
+
+      if (isBagPkg(order)) {
+        nextAllowedBagProdStart = startMinutes + slot + BAG_COOLDOWN_MINUTES;
+      }
+    });
+
+    return {
+      baseDayStart,
+      firstOrderStart,
+      current,
+      nextAllowedBagProdStart
+    };
+  }, [bunkers, config, lineTiming, getTransitionMinutes]);
 
   const planRespectsLoadWindows = useCallback((lid: LineId, planToCheck: Order[]) => {
       const starts = getScheduledStartsForLine(planToCheck, lid);
@@ -1747,8 +2031,17 @@ export default function App() {
   }, [planningMaterials, calibrationMaterials]);
 
   const getEffectivePriority = (order: Order): 1 | 2 | 3 => {
-    if (order.pkg === 'bale' || order.pkg === 'bag') return 1;
-    return order.status === 'arrived' && !!normalizeEta(order.eta) ? 1 : 2;
+    const nowMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
+    const pkg = normalizePkg(order.pkg);
+    if (priorityOnePackages.has(pkg)) return 1;
+    if (pkg === 'bulk') {
+      if (order.status === 'arrived' && order.holdLoadTime) return 1;
+      const normalizedEta = getOrderLoadReferenceTime(order);
+      const etaMinutes = etaToMins(normalizedEta);
+      const loadWindowOpen = etaMinutes !== null && nowMinutes >= etaMinutes - 30;
+      return order.status === 'arrived' && loadWindowOpen ? 1 : 2;
+    }
+    return [1, 2, 3].includes(order.prio) ? order.prio : 2;
   };
 
   const getOrderContentMetrics = useCallback((prev: Order | null, order: Order, lid: LineId) => {
@@ -1766,8 +2059,8 @@ export default function App() {
     order.components.forEach(component => {
       const unit = (component.unit || '').toUpperCase();
       const bulkLike = unit === 'M3' || unit === 'PERC' || unit === '' || lineBunkers.some(b =>
-        (b.ms && b.ms.some(m => materialsEquivalent(m, component.name))) ||
-        (b.materialData && Object.entries(b.materialData).some(([mName, mData]) => materialsEquivalent(mName, component.name) || materialCodesEquivalent(mData.code, component.code)))
+        (b.ms && b.ms.some(m => canUseExistingMaterialForRequested(m, null, component.name, component.code))) ||
+        (b.materialData && Object.entries(b.materialData).some(([mName, mData]) => canUseExistingMaterialForRequested(mName, mData.code, component.name, component.code)))
       );
       if (!bulkLike) return;
 
@@ -2054,8 +2347,29 @@ export default function App() {
     const pool = sourceOrders.filter(o => o.status !== 'running');
     const plan: Order[] = [...running];
     let current: Order | null = running.length > 0 ? running[running.length - 1] : null;
-    const fixedFirstEta = FIXED_FIRST_ORDER_START;
+    const fixedFirstEta = effectiveFirstOrderStart;
     const fixedFirstEtaMins = etaToMins(fixedFirstEta) ?? 15;
+
+    if (!current && pool.length > 0) {
+      const holdLoadCandidates = pool
+        .map((order, index) => ({ order, index }))
+        .filter(({ order }) => order.status === 'arrived' && !!order.holdLoadTime);
+
+      if (holdLoadCandidates.length > 0) {
+        holdLoadCandidates.sort((a, b) => {
+          const etaA = etaToMins(normalizeEta(a.order.arrivedTime || a.order.eta)) || 9999;
+          const etaB = etaToMins(normalizeEta(b.order.arrivedTime || b.order.eta)) || 9999;
+          if (etaA !== etaB) return etaA - etaB;
+          const swA = swCount(current, a.order, bunkers[lid]);
+          const swB = swCount(current, b.order, bunkers[lid]);
+          if (swA !== swB) return swA - swB;
+          return ev(b.order) - ev(a.order);
+        });
+        const picked = pool.splice(holdLoadCandidates[0].index, 1)[0];
+        plan.push(picked);
+        current = picked;
+      }
+    }
 
     if (!current && pool.length > 0) {
       const fixedFirstCandidates = pool
@@ -2102,6 +2416,8 @@ export default function App() {
 
       if (arrivedEtaCandidates.length > 0) {
         arrivedEtaCandidates.sort((a, b) => {
+          const holdDiff = Number(!!b.order.holdLoadTime) - Number(!!a.order.holdLoadTime);
+          if (holdDiff !== 0) return holdDiff;
           const etaA = etaToMins(normalizeEta(a.order.eta)) || 9999;
           const etaB = etaToMins(normalizeEta(b.order.eta)) || 9999;
           if (etaA !== etaB) return etaA - etaB;
@@ -2124,6 +2440,7 @@ export default function App() {
         const otherEta = normalizeEta(other.eta);
         return !otherEta || (etaToMins(otherEta) ?? 9999) <= fixedFirstEtaMins + 15;
       });
+      const planCursor = getLinePlanCursor(plan, lid);
 
         pool.forEach((order, index) => {
           if (prioritizeBalePool && !isBaleOrder(order)) return;
@@ -2143,6 +2460,7 @@ export default function App() {
           const preparationContinuityBonus = getPreparationContinuityBonus(plan, order, lid);
           const continuationBonus = getContinuationPotential(lid, plan, order, pool);
           const deferredBulkPenalty = order.pkg === 'bulk' && effPrio > 1 ? 50000 : 0;
+          const holdLoadTimeBonus = order.status === 'arrived' && order.holdLoadTime ? 80000 : 0;
           const starterBulkDelayPenalty =
             !current &&
             hasFlexibleEarlyStarter &&
@@ -2175,14 +2493,27 @@ export default function App() {
             : 0;
           const sameRitBonus = current && order.rit && current.rit && current.rit === order.rit ? 40000 : 0;
           const sameCustomerLargeBonus = current && isLargeOrder && ev(current) >= LARGE_ORDER_M3 && current.customer === order.customer ? 30000 : 0;
-          const simulatedPlan = [...plan, order];
-          const simulatedStarts = getScheduledStartsForLine(simulatedPlan, lid);
-          const simulatedStart = simulatedStarts[simulatedStarts.length - 1];
           const transitionMinutes = getTransitionMinutes(lid, current, order);
-          const candidateProdStartMinutes =
-            (simulatedStart.getHours() * 60) +
-            simulatedStart.getMinutes() +
-            transitionMinutes;
+          let candidateStartMinutes = plan.length === 0
+            ? (planCursor.firstOrderStart - planCursor.baseDayStart)
+            : planCursor.current;
+
+          if (isBagPkg(order) && planCursor.nextAllowedBagProdStart !== null) {
+            candidateStartMinutes = Math.max(candidateStartMinutes, planCursor.nextAllowedBagProdStart - transitionMinutes);
+          }
+
+          if (hasEta && plan.length > 0) {
+            const windowStart = etaMins!;
+            const windowEnd = etaMins! + (order.status === 'arrived' ? 30 : config[lid].maxWait);
+            const earliestPrepStart = windowStart - transitionMinutes;
+            const latestPrepStart = windowEnd - transitionMinutes;
+            if (earliestPrepStart > candidateStartMinutes) {
+              candidateStartMinutes = earliestPrepStart;
+            }
+            candidateStartMinutes = Math.min(candidateStartMinutes, latestPrepStart);
+          }
+
+          const candidateProdStartMinutes = planCursor.baseDayStart + candidateStartMinutes + transitionMinutes;
 
           let loadWindowPenalty = 0;
           let urgencyBonus = 0;
@@ -2212,6 +2543,7 @@ export default function App() {
             score =
               effPrio * 100000 +
               deferredBulkPenalty +
+              0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
               baleAfterBagBonus +
@@ -2238,6 +2570,7 @@ export default function App() {
             score =
               effPrio * 100000 +
               deferredBulkPenalty +
+              0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
               baleAfterBagBonus +
@@ -2263,6 +2596,7 @@ export default function App() {
             score =
               effPrio * 100000 +
               deferredBulkPenalty +
+              0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
               baleAfterBagBonus +
@@ -2289,6 +2623,7 @@ export default function App() {
               fixedFirstBonus +
               effPrio * 100000 +
               deferredBulkPenalty +
+              0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
               baleAfterBagBonus +
@@ -2327,7 +2662,7 @@ export default function App() {
     }
 
     return plan;
-  }, [bunkers, lineTiming, plannerSort, getOrderContentMetrics, getContentClusterBonus, getWindowClusterBonus, getRitWindowClusterBonus, getTrailingBlockMaterialBias, getTrailingBlockComboBias, getScheduledStartsForLine, config, getTransitionMinutes, isBagOrder, isBaleOrder]);
+  }, [bunkers, lineTiming, plannerSort, getOrderContentMetrics, getContentClusterBonus, getWindowClusterBonus, getRitWindowClusterBonus, getTrailingBlockMaterialBias, getTrailingBlockComboBias, config, getTransitionMinutes, isBagOrder, isBaleOrder, getLinePlanCursor]);
 
   const activeOrders = useMemo(() => {
     const base = orders.filter(o => o.status !== 'completed');
@@ -2471,6 +2806,7 @@ export default function App() {
           }
 
           const next: Record<LineId, number[]> = { 1: [], 2: [], 3: [] };
+          const recalculatedOrders = new Map<number, Order>();
           lineIds.forEach(lid => {
             const sourceOrders = activeOrders.filter(o => o.line === lid);
             const basePlan = buildLinePlan(lid, sourceOrders);
@@ -2479,9 +2815,19 @@ export default function App() {
               ? quickGapPlan
               : (planRespectsLoadWindows(lid, basePlan) ? basePlan : sourceOrders);
             next[lid] = finalPlan.map(o => o.id);
+            const starts = getScheduledStartsForLine(finalPlan, lid);
+            finalPlan.forEach((order, index) => {
+              const scheduledDate = starts[index] ? formatLocalDate(starts[index]) : order.date;
+              recalculatedOrders.set(order.id, scheduledDate && scheduledDate !== order.date
+                ? { ...order, date: scheduledDate }
+                : order);
+            });
           });
+          const nextOrders = orders.map(order => recalculatedOrders.get(order.id) || order);
+          setOrders(nextOrders);
           setPlannedOrderIdsByLine(next);
           if (isSupabaseConfigured()) {
+            await writeOrdersToSupabase(nextOrders);
             await writePlannedOrderIdsToSupabase(next);
           }
         } catch (error) {
@@ -2495,7 +2841,7 @@ export default function App() {
         }
       })();
     }, 0);
-  }, [activeOrders, buildLinePlan, fillQuickGapWithinLine, planRespectsLoadWindows, plannerRecalcLock]);
+  }, [activeOrders, buildLinePlan, fillQuickGapWithinLine, getScheduledStartsForLine, orders, planRespectsLoadWindows, plannerRecalcLock]);
 
   const lineOrdersByLine = useMemo(() => {
     const res: Record<LineId, Order[]> = { 1: [], 2: [], 3: [] };
@@ -2548,6 +2894,16 @@ export default function App() {
     return res;
   }, [lineIds, lineOrdersByLine, schedule, bunkers, config, getTransitionMinutes]);
 
+  const lineTimelineEntryByOrderId = useMemo(() => {
+    const res: Record<LineId, Map<number, ScheduledLineEntry>> = { 1: new Map(), 2: new Map(), 3: new Map() };
+    lineIds.forEach(lid => {
+      lineTimelineByLine[lid].forEach(entry => {
+        res[lid].set(entry.order.id, entry);
+      });
+    });
+    return res;
+  }, [lineIds, lineTimelineByLine]);
+
   const selectedLineOrders = useMemo(
     () => lineOrdersByLine[selectedLine],
     [lineOrdersByLine, selectedLine]
@@ -2599,6 +2955,42 @@ export default function App() {
     if (!displayedCurrentOrder) return null;
     return selectedLineTimeline.find(entry => entry.order.id === displayedCurrentOrder.id) || null;
   }, [displayedCurrentOrder, selectedLineTimeline]);
+
+  const displayedCurrentActualStart = useMemo(() => {
+    if (!displayedCurrentOrder) return null;
+    if (displayedCurrentOrder.status === 'running' && displayedCurrentOrder.startedAt) {
+      const actualStart = new Date(displayedCurrentOrder.startedAt);
+      if (!Number.isNaN(actualStart.getTime())) return actualStart;
+    }
+    if (displayedCurrentOrder.status === 'running') {
+      return new Date();
+    }
+    return displayedCurrentEntry?.prodStart || null;
+  }, [displayedCurrentOrder, displayedCurrentEntry]);
+
+  const displayedCurrentActualEnd = useMemo(() => {
+    if (!displayedCurrentOrder || !displayedCurrentActualStart) {
+      return displayedCurrentEntry?.endTime || null;
+    }
+    return new Date(displayedCurrentActualStart.getTime() + rt(displayedCurrentOrder, LINES[selectedLine].speed) * 60000);
+  }, [displayedCurrentActualStart, displayedCurrentEntry, displayedCurrentOrder, selectedLine]);
+
+  const displayedCurrentProgress = useMemo(() => {
+    if (!displayedCurrentOrder || displayedCurrentOrder.status !== 'running' || !displayedCurrentActualStart) {
+      return progress;
+    }
+    const total = rt(displayedCurrentOrder, LINES[selectedLine].speed) * 60000;
+    if (total <= 0) return 0;
+    const elapsed = currentTime.getTime() - displayedCurrentActualStart.getTime();
+    return Math.max(0, Math.min(99, (elapsed / total) * 100));
+  }, [currentTime, displayedCurrentActualStart, displayedCurrentOrder, progress, selectedLine]);
+
+  const operatorRuntimeShiftMs = useMemo(() => {
+    if (!displayedCurrentOrder || displayedCurrentOrder.status !== 'running') return 0;
+    if (!displayedCurrentEntry || !displayedCurrentActualEnd) return 0;
+    const shift = displayedCurrentActualEnd.getTime() - displayedCurrentEntry.endTime.getTime();
+    return shift > 0 ? shift : 0;
+  }, [displayedCurrentActualEnd, displayedCurrentEntry, displayedCurrentOrder]);
 
   const operatorLeegBunkers = useMemo(() => {
     if (!displayedCurrentOrder) return [];
@@ -2767,9 +3159,9 @@ export default function App() {
     }, ...prev]);
   };
   const canBunkerServeOrderComponent = (bunker: Bunker, component: Order['components'][number]) =>
-    (bunker.ms && bunker.ms.some(m => materialsEquivalent(m, component.name))) ||
+    (bunker.ms && bunker.ms.some(m => canUseExistingMaterialForRequested(m, null, component.name, component.code))) ||
     (bunker.materialData && Object.entries(bunker.materialData).some(([mName, mData]) =>
-      materialsEquivalent(mName, component.name) || (!!component.code && materialCodesEquivalent(mData.code, component.code))
+      canUseExistingMaterialForRequested(mName, mData.code, component.name, component.code)
     ));
 
   const getComponentGroupKey = (component: Order['components'][number]) => {
@@ -2781,10 +3173,15 @@ export default function App() {
   const isBulkLikeOrderComponent = (component: Order['components'][number]) => {
     const unit = (component.unit || '').trim().toUpperCase();
     const isInBunkerUniverse = lineBunkers.some(b =>
-      (b.m && materialsEquivalent(b.m, component.name)) ||
+      (b.m && canUseExistingMaterialForRequested(b.m, b.mc, component.name, component.code)) ||
       canBunkerServeOrderComponent(b, component)
     );
     return isInBunkerUniverse || unit === 'M3' || unit === 'PERC' || unit === '%' || unit === '';
+  };
+
+  const isBunkerEffectivelyEmpty = (bunker: Bunker) => {
+    const material = String(bunker.m || '').trim().toLowerCase();
+    return !material || material === 'leeg' || material === 'empty';
   };
 
   const getOrderBunkerAssignments = (order: Order) => {
@@ -2795,23 +3192,39 @@ export default function App() {
     bulkComponents.forEach(component => {
       const key = `${component.name}|${component.code}`;
       const currentMatch = lineBunkers.find(b =>
-        !usedBunkers.has(b.c) && (
-          (b.m && materialsEquivalent(b.m, component.name)) ||
-          (!!component.code && materialCodesEquivalent(b.mc, component.code))
-        )
+        !usedBunkers.has(b.c) &&
+        isBunkerExactMatchForComponent(b, component)
       );
       if (currentMatch) {
         assignments.set(key, currentMatch);
         usedBunkers.add(currentMatch.c);
+        return;
+      }
+      const reusableAssignedBunker = Array.from(assignments.values()).find((bunker): bunker is Bunker =>
+        !!bunker && canUseExistingMaterialForRequested(bunker.m, bunker.mc, component.name, component.code)
+      );
+      if (reusableAssignedBunker) {
+        assignments.set(key, reusableAssignedBunker);
       }
     });
 
     bulkComponents.forEach(component => {
       const key = `${component.name}|${component.code}`;
       if (assignments.has(key)) return;
-      const possibleMatch = lineBunkers.find(b =>
-        !usedBunkers.has(b.c) && canBunkerServeOrderComponent(b, component)
+      const reusableAssignedBunker = Array.from(assignments.values()).find((bunker): bunker is Bunker =>
+        !!bunker && canBunkerServeOrderComponent(bunker, component)
       );
+      if (reusableAssignedBunker) {
+        assignments.set(key, reusableAssignedBunker);
+        return;
+      }
+      const possibleMatch = lineBunkers
+        .filter(b => !usedBunkers.has(b.c) && canBunkerServeOrderComponent(b, component))
+        .sort((a, b) => {
+          const emptyDiff = Number(isBunkerEffectivelyEmpty(b)) - Number(isBunkerEffectivelyEmpty(a));
+          if (emptyDiff !== 0) return emptyDiff;
+          return a.c.localeCompare(b.c);
+        })[0];
       if (possibleMatch) {
         assignments.set(key, possibleMatch);
         usedBunkers.add(possibleMatch.c);
@@ -2826,8 +3239,7 @@ export default function App() {
   const isBunkerReadyForComponent = (bunker: Bunker | null | undefined, component: Order['components'][number]) => {
     if (!bunker) return false;
     const exactMatch =
-      (!!bunker.m && materialsEquivalent(bunker.m, component.name)) ||
-      (!!component.code && materialCodesEquivalent(bunker.mc, component.code));
+      canUseExistingMaterialForRequested(bunker.m, bunker.mc, component.name, component.code);
     if (exactMatch) return true;
     return !!bunker.fx && canBunkerServeOrderComponent(bunker, component);
   };
@@ -2857,10 +3269,11 @@ export default function App() {
     nowMinutes: number
   ): { label: string; cls: string; reason: string; key: 'direct' | 'prep' | 'wait' } => {
     const lineIssue = storingen[order.line];
-    const normalizedEta = normalizeEta(order.eta);
+    const normalizedEta = getOrderLoadReferenceTime(order);
     const etaMinutes = etaToMins(normalizedEta);
-    const missingBulkLoadTime = order.pkg === 'bulk' && !normalizedEta;
-    const waitsForBulk = order.pkg === 'bulk' && etaMinutes !== null && etaMinutes > nowMinutes;
+    const pkg = normalizePkg(order.pkg);
+    const missingBulkLoadTime = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && !normalizedEta;
+    const waitsForBulk = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes - 30;
     const needsRecipeBunkerPrep = !isOrderDirectlyRunnable(order);
     const needsCleaning = index === 0 && hasProlineCleaningTrigger(order);
     const bunkerPrepReason = getOrderBunkerPrepReason(order);
@@ -2889,7 +3302,7 @@ export default function App() {
       return { label: 'Wachten', cls: 'bg-blue-100 text-blue-700', reason: 'Wacht op laadtijd', key: 'wait' };
     }
     if (waitsForBulk) {
-      return { label: 'Wachten', cls: 'bg-blue-100 text-blue-700', reason: `Bulk ${order.eta}`, key: 'wait' };
+      return { label: 'Wachten', cls: 'bg-blue-100 text-blue-700', reason: `Bulk ${normalizedEta}`, key: 'wait' };
     }
     if (needsCleaning) {
       return { label: 'Direct', cls: 'bg-green-100 text-green-700', reason: 'Proline reinigingsactie', key: 'direct' };
@@ -2904,10 +3317,11 @@ export default function App() {
     nowMinutes: number
   ): { label: string; cls: string; reason: string; key: 'direct' | 'prep' | 'wait' } => {
     const lineIssue = storingen[order.line];
-    const normalizedEta = normalizeEta(order.eta);
+    const normalizedEta = getOrderLoadReferenceTime(order);
     const etaMinutes = etaToMins(normalizedEta);
-    const missingBulkLoadTime = order.pkg === 'bulk' && !normalizedEta;
-    const waitsForBulk = order.pkg === 'bulk' && etaMinutes !== null && etaMinutes > nowMinutes;
+    const pkg = normalizePkg(order.pkg);
+    const missingBulkLoadTime = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && !normalizedEta;
+    const waitsForBulk = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes - 30;
     const needsRecipeBunkerPrep = !isOrderDirectlyRunnable(order);
     const bunkerPrepReason = getOrderBunkerPrepReason(order);
     const needsCleaning = index === 0 && hasProlineCleaningTrigger(order);
@@ -2935,7 +3349,7 @@ export default function App() {
       return { label: 'Wachten', cls: 'bg-blue-100 text-blue-700', reason: 'Wacht op laadtijd', key: 'wait' };
     }
     if (waitsForBulk) {
-      return { label: 'Wachten', cls: 'bg-blue-100 text-blue-700', reason: `Bulk ${order.eta}`, key: 'wait' };
+      return { label: 'Wachten', cls: 'bg-blue-100 text-blue-700', reason: `Bulk ${normalizedEta}`, key: 'wait' };
     }
     if (needsCleaning) {
       return { label: 'Direct', cls: 'bg-green-100 text-green-700', reason: 'Proline reinigingsactie', key: 'direct' };
@@ -2954,6 +3368,10 @@ export default function App() {
         plannerState: getPlannerOrderState(entry.order, index, lineEntries, nowMinutes)
       }))
       .sort((a, b) => {
+        const holdDiff =
+          Number(b.order.status === 'arrived' && !!b.order.holdLoadTime) -
+          Number(a.order.status === 'arrived' && !!a.order.holdLoadTime);
+        if (holdDiff !== 0) return holdDiff;
         const rankDiff = rank[a.plannerState.key] - rank[b.plannerState.key];
         if (rankDiff !== 0) return rankDiff;
         const prioDiff = getEffectivePriority(a.order) - getEffectivePriority(b.order);
@@ -2990,6 +3408,49 @@ export default function App() {
     });
   }, [currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes]);
 
+  const plannerDisplayEntriesByLine = useMemo(() => ({
+    1: getPlannerDisplayEntries(lineTimelineByLine[1]),
+    2: getPlannerDisplayEntries(lineTimelineByLine[2]),
+    3: getPlannerDisplayEntries(lineTimelineByLine[3])
+  }), [lineTimelineByLine, getPlannerDisplayEntries]);
+
+  const plannerVisibleDates = useMemo(() => {
+    const allDates = lineIds
+      .flatMap(lid => plannerDisplayEntriesByLine[lid].map(entry => formatLocalDate(entry.prodStart)))
+      .filter(Boolean);
+    return Array.from(new Set(allDates))
+      .sort()
+      .map(value => parseLocalDate(value))
+      .filter(Boolean) as Date[];
+  }, [lineIds, plannerDisplayEntriesByLine]);
+
+  const plannerWeekDates = useMemo(() => {
+    const anchor = plannerVisibleDates[0] || currentTime;
+    return getWeekDates(anchor);
+  }, [plannerVisibleDates, currentTime]);
+
+  useEffect(() => {
+    const hasSelectedDate = plannerVisibleDates.some(date => formatLocalDate(date) === plannerSelectedDate);
+    if (!hasSelectedDate) {
+      const nextVisibleDate = plannerVisibleDates[0] ? formatLocalDate(plannerVisibleDates[0]) : formatLocalDate(currentTime);
+      setPlannerSelectedDate(nextVisibleDate);
+    }
+  }, [plannerVisibleDates, plannerSelectedDate, currentTime]);
+
+  const filteredPlannerDisplayEntriesByLine = useMemo(() => ({
+    1: plannerDisplayEntriesByLine[1].filter(entry => formatLocalDate(entry.prodStart) === plannerSelectedDate),
+    2: plannerDisplayEntriesByLine[2].filter(entry => formatLocalDate(entry.prodStart) === plannerSelectedDate),
+    3: plannerDisplayEntriesByLine[3].filter(entry => formatLocalDate(entry.prodStart) === plannerSelectedDate)
+  }), [plannerDisplayEntriesByLine, plannerSelectedDate]);
+
+  const plannerDisplayIndexByLine = useMemo(() => ({
+    1: new Map(filteredPlannerDisplayEntriesByLine[1].map((entry, index) => [entry.order.id, index])),
+    2: new Map(filteredPlannerDisplayEntriesByLine[2].map((entry, index) => [entry.order.id, index])),
+    3: new Map(filteredPlannerDisplayEntriesByLine[3].map((entry, index) => [entry.order.id, index]))
+  }), [filteredPlannerDisplayEntriesByLine]);
+
+  const visiblePlannerTriggers = activePlannerTriggerRows;
+
   const operatorDisplayEntries = useMemo(() => {
       const nowMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
       const rank = { direct: 0, prep: 1, wait: 2 } as const;
@@ -3001,6 +3462,10 @@ export default function App() {
           operatorState: getOperatorOrderState(entry.order, index, nowMinutes)
         }))
       .sort((a, b) => {
+        const holdDiff =
+          Number(b.order.status === 'arrived' && !!b.order.holdLoadTime) -
+          Number(a.order.status === 'arrived' && !!a.order.holdLoadTime);
+        if (holdDiff !== 0) return holdDiff;
         const rankDiff = rank[a.operatorState.key] - rank[b.operatorState.key];
         if (rankDiff !== 0) return rankDiff;
           const prioDiff = getEffectivePriority(a.order) - getEffectivePriority(b.order);
@@ -3013,6 +3478,18 @@ export default function App() {
       const orderedOrders = prioritizedEntries.map(entry => entry.order);
       const starts = getScheduledStartsForLine(orderedOrders, lid);
 
+      let cascadingShiftMs = operatorRuntimeShiftMs;
+      if (!displayedCurrentOrder && prioritizedEntries.length > 0) {
+        const firstOrder = prioritizedEntries[0].order;
+        const firstPrevOrder = null;
+        const firstStartTime = starts[0];
+        const firstTransitionMinutes = getTransitionMinutes(lid, firstPrevOrder, firstOrder);
+        const firstBaseProdStart = new Date(firstStartTime.getTime() + firstTransitionMinutes * 60000);
+        const nowTime = currentTime.getTime();
+        if (firstBaseProdStart.getTime() < nowTime) {
+          cascadingShiftMs += nowTime - firstBaseProdStart.getTime();
+        }
+      }
       return prioritizedEntries.map((entry, index) => {
         const order = entry.order;
         const prevOrder = index > 0 ? orderedOrders[index - 1] : null;
@@ -3021,8 +3498,14 @@ export default function App() {
         const sw = swMats.length;
         const duration = rt(order, LINES[lid].speed);
         const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
-        const prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
-        const endTime = new Date(prodStart.getTime() + duration * 60000);
+        const baseProdStart = new Date(startTime.getTime() + transitionMinutes * 60000);
+        const baseEndTime = new Date(baseProdStart.getTime() + duration * 60000);
+        let prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
+        if (index === 0 && displayedCurrentOrder?.status === 'running' && displayedCurrentActualEnd && prodStart.getTime() < displayedCurrentActualEnd.getTime()) {
+          cascadingShiftMs += displayedCurrentActualEnd.getTime() - prodStart.getTime();
+          prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
+        }
+        const endTime = new Date(baseEndTime.getTime() + cascadingShiftMs);
 
         return {
           ...entry,
@@ -3035,7 +3518,7 @@ export default function App() {
           operatorState: getOperatorOrderState(order, index, nowMinutes)
         };
       });
-    }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes]);
+    }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd]);
 
   const nextOperatorOrder = useMemo(
     () => operatorDisplayEntries[0]?.order || null,
@@ -3148,7 +3631,7 @@ export default function App() {
       return {
         id: order.id,
         customer: order.customer,
-        start: fmt(entry.prodStart),
+        schedule: formatOperatorDateTimeRange(entry.prodStart, entry.endTime, currentTime),
         status: operatorState.key,
         reason: operatorState.reason,
         volume: ev(order).toFixed(1),
@@ -3158,7 +3641,7 @@ export default function App() {
         isBulk: order.pkg.toLowerCase() === 'bulk'
       };
     });
-  }, [operatorDisplayEntries]);
+  }, [operatorDisplayEntries, currentTime]);
 
   const totalCompletedM3 = useMemo(() => 
     completedOrders.reduce((sum, o) => sum + ev(o), 0), 
@@ -3184,7 +3667,7 @@ export default function App() {
       .forEach(order => {
       const name = String(order.driver || '').trim();
       if (!name) return;
-      const timelineEntry = lineTimelineByLine[order.line].find(entry => entry.order.id === order.id) || null;
+      const timelineEntry = lineTimelineEntryByOrderId[order.line].get(order.id) || null;
       const startMinutes = timelineEntry ? (timelineEntry.prodStart.getHours() * 60 + timelineEntry.prodStart.getMinutes()) : null;
       const endMinutes = timelineEntry ? (timelineEntry.endTime.getHours() * 60 + timelineEntry.endTime.getMinutes()) : null;
       const existing = driverCounts.get(name) || { count: 0, lines: new Set<LineId>(), totalVolume: 0, firstStart: null, lastEnd: null };
@@ -3216,7 +3699,7 @@ export default function App() {
       };
       })
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'nl-NL'));
-  }, [plannedActiveOrders, plannerLineFilter, lineTimelineByLine, sharedDriverNames]);
+  }, [plannedActiveOrders, plannerLineFilter, lineTimelineEntryByOrderId, sharedDriverNames]);
 
   const visiblePlannerDrivers = useMemo(() => {
     const q = chauffeurSearch.trim().toLowerCase();
@@ -3281,7 +3764,7 @@ export default function App() {
         : normalizeEta(order.eta);
       const etaMinutes = relevantLoadTime ? timeStringToMinutes(relevantLoadTime, 0) : null;
       const runtimeMinutes = rt(order, LINES[order.line].speed) + config[order.line].empty;
-      const entry = lineTimelineByLine[order.line].find(lineEntry => lineEntry.order.id === order.id) || null;
+      const entry = lineTimelineEntryByOrderId[order.line].get(order.id) || null;
       const start = etaMinutes !== null
         ? etaMinutes
         : entry
@@ -3311,7 +3794,7 @@ export default function App() {
     });
 
     return conflicts;
-  }, [chauffeurOrders, lineTimelineByLine]);
+  }, [chauffeurOrders, lineTimelineEntryByOrderId]);
 
   const orderedChauffeurOrders = useMemo(() => {
     return chauffeurOrders
@@ -3386,7 +3869,7 @@ export default function App() {
       ? normalizeEta(order.arrivedTime || order.eta)
       : normalizeEta(order.eta);
     const etaMinutes = relevantLoadTime ? timeStringToMinutes(relevantLoadTime, 0) : null;
-    const entry = lineTimelineByLine[order.line].find(lineEntry => lineEntry.order.id === order.id) || null;
+      const entry = lineTimelineEntryByOrderId[order.line].get(order.id) || null;
     const runtimeMinutes = rt(order, LINES[order.line].speed) + config[order.line].empty;
     const startMinutes = etaMinutes !== null
       ? etaMinutes
@@ -3424,7 +3907,8 @@ export default function App() {
 
   const handleStartOrder = async (id: number) => {
     const target = orders.find(o => o.id === id);
-    const nextOrders = orders.map(o => o.id === id ? { ...o, status: 'running' } : o);
+    const startedAt = new Date().toISOString();
+    const nextOrders = orders.map(o => o.id === id ? { ...o, status: 'running', startedAt } : o);
     await persistOrders(nextOrders, 'Start sync mislukt', target?.line ?? null, target?.num ?? null);
     setProgress(0);
   };
@@ -3480,7 +3964,7 @@ export default function App() {
     const target = orders.find(o => o.id === id);
     const nextOrders = orders.map(o =>
       o.id === id && o.status === 'arrived'
-        ? { ...o, status: 'planned' }
+        ? { ...o, status: 'planned', holdLoadTime: false }
         : o
     );
     await persistOrders(nextOrders, 'Order sync mislukt', target?.line ?? null, target?.num ?? null);
@@ -3650,21 +4134,6 @@ export default function App() {
                 <div className="flex items-center justify-between mb-4.5">
                   <h1 className="text-xl font-bold">Operator Dashboard</h1>
                   <div className="flex gap-2">
-                    <button 
-                      className="btn btn-p btn-sm" 
-                      onClick={laadOrders}
-                      disabled={dataSource.loading}
-                    >
-                      <RefreshCw size={14} className={dataSource.loading ? 'animate-spin' : ''} />
-                      {dataSource.loading ? 'Bezig...' : 'Sync Orders'}
-                    </button>
-                    <button 
-                      className="btn btn-s btn-sm" 
-                      onClick={laadKalibratie}
-                      disabled={dataSource.loading}
-                    >
-                      Sync Kalibratie
-                    </button>
                     <button
                       className={`rounded-xl border px-4 py-2 text-sm font-semibold ${
                         activeIssue?.soort === 'storing'
@@ -3826,7 +4295,7 @@ export default function App() {
                           ) : (
                             <Package size={14} className="text-orange-500" />
                           )}
-                          <span>{card.start}</span>
+                          <span>{card.schedule}</span>
                           <span className="text-gray-300">-</span>
                           <span>{card.volume} m3</span>
                           <span className="text-gray-300">-</span>
@@ -3880,16 +4349,16 @@ export default function App() {
                             {displayedCurrentEntry && (
                               <>
                                 <span className="text-gray-200">-</span>
-                                <span>{fmt(displayedCurrentEntry.prodStart)} - {fmt(displayedCurrentEntry.endTime)}</span>
+                                <span>{displayedCurrentActualStart ? fmt(displayedCurrentActualStart) : '--:--'} - {displayedCurrentActualEnd ? fmt(displayedCurrentActualEnd) : '--:--'}</span>
                               </>
                             )}
                           </div>
                           <div className="pb">
-                            <div className="pf" style={{ width: `${progress}%` }}></div>
+                            <div className="pf" style={{ width: `${displayedCurrentProgress}%` }}></div>
                           </div>
                           <div className="flex justify-between text-[11px] text-gray-400">
                             <span>{displayedCurrentOrder.status === 'running' ? 'Gestart' : 'Gepland'}</span>
-                            <span>{displayedCurrentOrder.status === 'running' ? `${Math.round(progress)}%` : (normalizeEta(displayedCurrentOrder.eta) || '--')}</span>
+                            <span>{displayedCurrentOrder.status === 'running' ? `${Math.round(displayedCurrentProgress)}%` : (normalizeEta(displayedCurrentOrder.eta) || '--')}</span>
                             <span>~{displayedCurrentEntry ? displayedCurrentEntry.duration.toFixed(1) : rt(displayedCurrentOrder, LINES[selectedLine].speed).toFixed(1)} min</span>
                           </div>
                           <div className="grid grid-cols-4 gap-2 mt-3">
@@ -3904,7 +4373,7 @@ export default function App() {
                             {displayedCurrentEntry && (
                               <div className="bg-gray-50 rounded-md p-2">
                                 <div className="text-[10px] text-gray-400 mb-0.5">Eindtijd</div>
-                                <div className="text-sm font-semibold">{fmt(displayedCurrentEntry.endTime)}</div>
+                                <div className="text-sm font-semibold">{displayedCurrentActualEnd ? fmt(displayedCurrentActualEnd) : '--:--'}</div>
                               </div>
                             )}
                           </div>
@@ -4009,7 +4478,7 @@ export default function App() {
                                 {getOrderRefLabel(o)}
                               </div>
                               <div className="text-[11px] text-gray-500 mt-0.5 truncate">
-                                <span className="font-medium">{o.recipe}</span> - {ev(o).toFixed(1)} m3 - {fmt(entry.endTime)}
+                                <span className="font-medium">{o.recipe}</span> - {ev(o).toFixed(1)} m3 - {formatOperatorDateTimeRange(entry.prodStart, entry.endTime, currentTime)}
                               </div>
                               <div className="mt-1 flex items-center gap-2 flex-wrap text-[10px] font-medium text-gray-500">
                                 <span className={`rounded-full px-2 py-0.5 font-bold uppercase tracking-wide ${o.pkg === 'bulk' ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600'}`}>
@@ -4104,7 +4573,7 @@ export default function App() {
                     <div className="mt-1 flex items-center gap-3 text-xs text-gray-500">
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-green-50 px-2 py-1 font-medium text-green-700">
                         <span className="h-2 w-2 rounded-full bg-green-500"></span>
-                        Auto-sync actief
+                        Auto-sync elke 15 min
                       </span>
                       <span>
                         Laatste sync: {dataSource.lastSync ? new Date(dataSource.lastSync).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' }) : 'Nog niet'}
@@ -4118,6 +4587,40 @@ export default function App() {
                     </button>
                     </div>
                   </div>
+
+                {plannerWeekDates.length > 0 && (
+                  <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50/50 px-4 py-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700">
+                        Weekplanning
+                      </span>
+                      {plannerWeekDates.map((date) => {
+                        const dateKey = formatLocalDate(date);
+                        const isPlanned = plannerVisibleDates.some(visibleDate => formatLocalDate(visibleDate) === formatLocalDate(date));
+                        const isToday = formatLocalDate(date) === formatLocalDate(currentTime);
+                        const isSelected = plannerSelectedDate === dateKey;
+                        return (
+                          <button
+                            type="button"
+                            key={dateKey}
+                            onClick={() => setPlannerSelectedDate(dateKey)}
+                            className={`rounded-full px-2.5 py-1 text-xs font-semibold border transition-colors ${
+                              isSelected
+                                ? 'bg-blue-50 text-blue-700 border-blue-200'
+                                : isPlanned
+                                  ? 'bg-white text-amber-800 border-amber-200 hover:bg-amber-100/60'
+                                  : isToday
+                                    ? 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100/70'
+                                    : 'bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100'
+                            }`}
+                          >
+                            {formatPlannerDateChip(date)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {/* Sub Tabs */}
                 <div className="flex items-center justify-between gap-4 mb-5 border-b-2 border-gray-200">
@@ -4189,13 +4692,6 @@ export default function App() {
                         <ClipboardList size={16} />
                       </div>
                     </div>
-                    <button 
-                      onClick={() => { laadOrders(); laadKalibratie(); }}
-                      className="p-2 bg-white border border-gray-200 rounded-lg text-gray-500 hover:text-gr hover:border-gr transition-all shadow-sm"
-                      title="Synchroniseer gegevens"
-                    >
-                      <RefreshCw size={18} className={dataSource.loading ? 'animate-spin' : ''} />
-                    </button>
                   </div>
                 </div>
 
@@ -4299,14 +4795,13 @@ export default function App() {
                                 const s = plannerSearch.toLowerCase();
                                 return o.customer.toLowerCase().includes(s) || o.num.includes(s) || o.recipe.toLowerCase().includes(s);
                               });
-                            const timeline = lineTimelineByLine[lid].filter(entry => {
+                            const plannerDisplayTimeline = filteredPlannerDisplayEntriesByLine[lid].filter(entry => {
                               const o = entry.order;
                               const s = plannerSearch.toLowerCase();
                               return o.customer.toLowerCase().includes(s) || o.num.includes(s) || o.recipe.toLowerCase().includes(s);
                             });
-                            const plannerDisplayTimeline = getPlannerDisplayEntries(timeline);
-                          
-                            const lineIssue = storingen[lid];
+                            
+                              const lineIssue = storingen[lid];
                           return (
                             <div key={lid} className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                               <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
@@ -4402,8 +4897,11 @@ export default function App() {
                                   const o = entry.order;
                                   const { prodStart, endTime, swMats, sw, duration } = entry;
                                   const isRunning = o.status === 'running';
-                                  const previousEntry = entry.originalIndex > 0 ? timeline[entry.originalIndex - 1] : null;
+                                  const previousEntry = i > 0 ? plannerDisplayTimeline[i - 1] : null;
                                   const plannerState = entry.plannerState;
+                                  const dateKey = formatLocalDate(prodStart);
+                                  const previousDateKey = previousEntry ? formatLocalDate(previousEntry.prodStart) : null;
+                                  const showDateHeading = i === 0 || previousDateKey !== dateKey;
 
                                   // Real-time progress calculation
                                   let orderProgress = 0;
@@ -4415,6 +4913,13 @@ export default function App() {
 
                                   return (
                                     <React.Fragment key={o.id}>
+                                      {showDateHeading && (
+                                        <div className="px-4 py-2 bg-gray-50 border-b border-gray-100">
+                                          <div className="text-[10px] font-bold uppercase tracking-wider text-gray-500">
+                                            {formatPlannerDateHeading(prodStart)}
+                                          </div>
+                                        </div>
+                                      )}
                                       {/* Wissel indicator if applicable */}
                                       {(sw > 0 || (i > 0 && config[lid].prep > 0)) && (
                                         <div className="px-4 py-2 bg-orange-50/50 flex flex-col gap-1 border-y border-orange-100/30">
@@ -4515,7 +5020,7 @@ export default function App() {
                                     <div className="w-10 h-10 bg-gray-50 rounded-full flex items-center justify-center text-gray-300">
                                       <ClipboardList size={20} />
                                     </div>
-                                    <div className="text-xs text-gray-400 italic">Geen orders gepland voor vandaag</div>
+                                    <div className="text-xs text-gray-400 italic">Geen orders gepland</div>
                                   </div>
                                 )}
                               </div>
@@ -4577,27 +5082,23 @@ export default function App() {
                             {plannedActiveOrders
                               .filter(o => plannerLineFilter === 0 || o.line === plannerLineFilter)
                               .filter(o => {
+                                const displayEntry = filteredPlannerDisplayEntriesByLine[o.line].find(entry => entry.order.id === o.id) || null;
+                                if (!displayEntry) return false;
                                 const s = plannerSearch.toLowerCase();
                                 return o.customer.toLowerCase().includes(s) || o.num.includes(s) || o.recipe.toLowerCase().includes(s);
                               })
                               .sort((a, b) => {
-                                const lineEntriesA = lineTimelineByLine[a.line];
-                                const lineEntriesB = lineTimelineByLine[b.line];
-                                const displayA = getPlannerDisplayEntries(lineEntriesA);
-                                const displayB = getPlannerDisplayEntries(lineEntriesB);
-                                const indexA = displayA.findIndex(entry => entry.order.id === a.id);
-                                const indexB = displayB.findIndex(entry => entry.order.id === b.id);
-                                if (a.line !== b.line) return a.line - b.line;
-                                if (indexA !== indexB) return indexA - indexB;
-                                return a.customer.localeCompare(b.customer);
-                              })
-                              .map(o => {
-                                const lineEntries = lineTimelineByLine[o.line];
-                                const timelineEntry = lineEntries.find(entry => entry.order.id === o.id) || null;
-                                const prodStart = timelineEntry?.prodStart || null;
-                                const displayEntries = getPlannerDisplayEntries(lineEntries);
-                                const displayEntry = displayEntries.find(entry => entry.order.id === o.id) || null;
-                                const plannerState = displayEntry?.plannerState || null;
+                                  const indexA = plannerDisplayIndexByLine[a.line].get(a.id) ?? Number.MAX_SAFE_INTEGER;
+                                  const indexB = plannerDisplayIndexByLine[b.line].get(b.id) ?? Number.MAX_SAFE_INTEGER;
+                                  if (a.line !== b.line) return a.line - b.line;
+                                  if (indexA !== indexB) return indexA - indexB;
+                                  return a.customer.localeCompare(b.customer);
+                                })
+                                .map(o => {
+                                  const displayEntries = filteredPlannerDisplayEntriesByLine[o.line];
+                                  const displayEntry = displayEntries.find(entry => entry.order.id === o.id) || null;
+                                  const prodStart = displayEntry?.prodStart || null;
+                                  const plannerState = displayEntry?.plannerState || null;
 
                                 return (
                                   <tr key={o.id}>
@@ -4749,6 +5250,7 @@ export default function App() {
                                             onClick={() => {
                                               setArrivedOrder(o);
                                               setArrivedTime(o.eta || '');
+                                              setArrivedHoldLoadTime(!!o.holdLoadTime);
                                             }}
                                             title="Wijzig laadtijd"
                                           >
@@ -4770,6 +5272,7 @@ export default function App() {
                                             onClick={() => {
                                               setArrivedOrder(o);
                                               setArrivedTime(o.eta || fmt(new Date()));
+                                              setArrivedHoldLoadTime(!!o.holdLoadTime);
                                             }}
                                           >
                                             <Check size={16} />
@@ -4814,10 +5317,11 @@ export default function App() {
                               />
                               <button
                                 type="button"
-                                className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700"
+                                className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
                                 onClick={handleAddDriver}
+                                disabled={isSavingDriver}
                               >
-                                + Chauffeur
+                                {isSavingDriver ? 'Opslaan...' : '+ Chauffeur'}
                               </button>
                             </div>
                             <div className="mt-3">
@@ -4971,7 +5475,7 @@ export default function App() {
                                 </div>
                               )}
                               {visibleChauffeurOrders.map(o => {
-                                const entry = lineTimelineByLine[o.line].find(lineEntry => lineEntry.order.id === o.id) || null;
+                                const entry = lineTimelineEntryByOrderId[o.line].get(o.id) || null;
                                 const hasDriverConflict = o.pkg === 'bulk' && driverConflictOrderIds.has(o.id);
                                 return (
                                   <div key={o.id} className="rounded-2xl border border-gray-200 p-4">
@@ -5286,11 +5790,33 @@ export default function App() {
                 </div>
 
                 <div className="bg-white border border-gray-200 rounded-lg p-5 mb-4">
+                  <h2 className="text-sm font-bold mb-3.5">Triggers</h2>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-gray-600">
+                    {visiblePlannerTriggers.map(trigger => (
+                      <div key={trigger.key} className="rounded-xl border border-gray-100 bg-gray-50/60 p-3">
+                        <div className="font-semibold text-gray-800 mb-1">{trigger.label}</div>
+                        <div>{trigger.description || 'Geen omschrijving'}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="bg-white border border-gray-200 rounded-lg p-5 mb-4">
                   <h2 className="text-sm font-bold mb-3.5">Lokale CSV Import</h2>
                   <div className="space-y-3">
                     <div className="text-xs text-gray-500">
-                      Importeer een lokale order-CSV met kolommen zoals `Datum`, `Menglijn`, `Order Nummer`, `Klantnaam`, `Product`, `Item / recept`, `Ritnummer`, `Geplande hoeveelheid`, `Gepland aantal` en `Eenheid`.
+                      Importeer een lokale order-CSV met kolommen zoals `Menglijn`, `Order Nummer`, `Klantnaam`, `Product`, `Item / recept`, `Ritnummer`, `Geplande hoeveelheid`, `Gepland aantal` en `Eenheid`. Als de CSV geen `Datum` kolom heeft, gebruiken we de importdatum hieronder.
                     </div>
+                    <label className="block">
+                      <span className="block text-[11px] font-medium text-gray-500 mb-1">Importdatum</span>
+                      <input
+                        type="date"
+                        className="fi fi-lg max-w-[220px]"
+                        value={csvImportDate}
+                        onChange={(e) => setCsvImportDate(e.target.value || formatLocalDate(new Date()))}
+                        disabled={isImportingCsv || dataSource.loading}
+                      />
+                    </label>
                     <input
                       type="file"
                       accept=".csv,text/csv"
@@ -5303,8 +5829,40 @@ export default function App() {
                       disabled={isImportingCsv || dataSource.loading}
                     />
                     <div className="text-[11px] text-gray-400">
-                      De import schrijft direct naar Supabase en ververst daarna de orders in de app.
+                      De import schrijft direct naar Supabase en ververst daarna de orders in de app. Zonder CSV-datum wordt `order_date` gevuld met deze importdatum.
                     </div>
+                    {csvImportFeedback && (
+                      <div className={`text-[11px] font-medium ${
+                        csvImportFeedback.type === 'ok'
+                          ? 'text-green-600'
+                          : csvImportFeedback.type === 'error'
+                            ? 'text-red-600'
+                            : 'text-blue-600'
+                      }`}>
+                        {csvImportFeedback.text}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-white border border-gray-200 rounded-lg p-5 mb-4">
+                  <h2 className="text-sm font-bold mb-3.5">Synchronisatie</h2>
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="text-xs text-gray-500">
+                      Orders lopen realtime via Supabase. Nieuwe bronorders worden automatisch elke 15 minuten opgehaald, of handmatig met deze knop.
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-p btn-sm whitespace-nowrap"
+                      onClick={laadOrders}
+                      disabled={dataSource.loading || isImportingCsv || isClearingOrders}
+                    >
+                      <RefreshCw size={14} className={dataSource.loading ? 'animate-spin' : ''} />
+                      {dataSource.loading ? 'Bezig...' : 'Sync Orders'}
+                    </button>
+                  </div>
+                  <div className="mt-3 text-[11px] text-gray-400">
+                    Laatste sync: {dataSource.lastSync ? new Date(dataSource.lastSync).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' }) : 'Nog niet'}
                   </div>
                 </div>
 
@@ -5506,14 +6064,7 @@ export default function App() {
                       )}
                       {allAvailableMaterials.length === 0 && (
                         <div className="text-center py-8 bg-gray-50 rounded-xl border border-dashed border-gray-200">
-                          <p className="text-sm text-gray-400 mb-4">Geen grondstoffen gevonden.</p>
-                          <button 
-                            onClick={laadKalibratie}
-                            className="px-4 py-2 bg-blue-500 text-white text-xs font-bold rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-2 mx-auto"
-                          >
-                            <Database size={14} />
-                            Sync Kalibratie
-                          </button>
+                          <p className="text-sm text-gray-400">Geen grondstoffen gevonden.</p>
                         </div>
                       )}
                     </div>
@@ -5658,7 +6209,7 @@ export default function App() {
                     <p className="text-sm text-gray-400">{arrivedOrder.customer}</p>
                   </div>
                   <button 
-                    onClick={() => setArrivedOrder(null)}
+                    onClick={() => { setArrivedOrder(null); setArrivedHoldLoadTime(false); }}
                     className="p-2 hover:bg-gray-100 rounded-full text-gray-400 transition-colors"
                   >
                     <X size={20} />
@@ -5685,12 +6236,25 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+
+                  <label className="mt-5 flex items-start gap-3 rounded-xl border border-orange-200 bg-orange-50/60 px-4 py-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="mt-1 h-4 w-4 rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                      checked={arrivedHoldLoadTime}
+                      onChange={(e) => setArrivedHoldLoadTime(e.target.checked)}
+                    />
+                    <span className="text-sm text-gray-700">
+                      <span className="block font-semibold text-gray-900">Laadtijd aanhouden</span>
+                      Houd deze wagen als vast blok vooraan. De planner laat hier dan niet onnodig andere verpakte orders tussendoor schuiven.
+                    </span>
+                  </label>
                 </div>
                 
                 <div className="p-6 bg-gray-50/50 flex justify-end gap-3">
                   <button 
                     className="px-6 py-2.5 rounded-xl font-bold text-gray-500 hover:bg-gray-200 transition-colors"
-                    onClick={() => setArrivedOrder(null)}
+                    onClick={() => { setArrivedOrder(null); setArrivedHoldLoadTime(false); }}
                   >
                     Annuleren
                   </button>
@@ -5741,16 +6305,19 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }
   };
 
   const canBunkerServeOrderComponent = (bunker: Bunker, component: Order['components'][number]) =>
-    (bunker.ms && bunker.ms.some(m => materialsEquivalent(m, component.name))) ||
+    (bunker.ms && bunker.ms.some(m => canUseExistingMaterialForRequested(m, null, component.name, component.code))) ||
     (bunker.materialData && Object.entries(bunker.materialData).some(([mName, mData]) =>
-      materialsEquivalent(mName, component.name) || (!!component.code && materialCodesEquivalent(mData.code, component.code))
+      canUseExistingMaterialForRequested(mName, mData.code, component.name, component.code)
     ));
+
+  const isBunkerEffectivelyEmpty = (bunker: Bunker) => {
+    const material = String(bunker.m || '').trim().toLowerCase();
+    return !material || material === 'leeg' || material === 'empty';
+  };
 
   const isBunkerReadyForComponent = (bunker: Bunker | null | undefined, component: Order['components'][number]) => {
     if (!bunker) return false;
-    const exactMatch =
-      (!!bunker.m && materialsEquivalent(bunker.m, component.name)) ||
-      (!!component.code && materialCodesEquivalent(bunker.mc, component.code));
+    const exactMatch = canUseExistingMaterialForRequested(bunker.m, bunker.mc, component.name, component.code);
     if (exactMatch) return true;
     return !!bunker.fx && canBunkerServeOrderComponent(bunker, component);
   };
@@ -5764,10 +6331,9 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }
       // Bunker-fed materials stay bulk, even if they are dosed in KG/L per m3.
       // True additives are materials outside bunker/calibration flow.
       const isInBunker = lineBunkers.some(b => 
-        (b.m && materialsEquivalent(b.m, c.name)) || 
-        (b.mc && materialCodesEquivalent(b.mc, c.code)) ||
-        (b.ms && b.ms.some(m => materialsEquivalent(m, c.name))) ||
-        (b.materialData && Object.entries(b.materialData).some(([mName, mData]) => materialsEquivalent(mName, c.name) || materialCodesEquivalent(mData.code, c.code)))
+        canUseExistingMaterialForRequested(b.m, b.mc, c.name, c.code) ||
+        (b.ms && b.ms.some(m => canUseExistingMaterialForRequested(m, null, c.name, c.code))) ||
+        (b.materialData && Object.entries(b.materialData).some(([mName, mData]) => canUseExistingMaterialForRequested(mName, mData.code, c.name, c.code)))
       );
 
       const isBulk = isInBunker || unit === 'M3' || unit === 'PERC' || unit === '%' || unit === '';
@@ -5794,15 +6360,21 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }
 
     // 1. Prioritize bunkers that ALREADY contain the material (Match by name or code)
     bulkComponents.forEach(c => {
-      const currentMatch = lineBunkers.find(b => 
-        !usedBunkers.has(b.c) && (
-          (b.m && (b.m === c.name || materialsEquivalent(b.m, c.name))) ||
-          (b.mc && materialCodesEquivalent(b.mc, c.code))
-        )
+      const key = `${c.name}|${c.code}`;
+      const currentMatch = lineBunkers.find(b =>
+        !usedBunkers.has(b.c) &&
+        isBunkerExactMatchForComponent(b, c)
       );
       if (currentMatch) {
         assignments.set(`${c.name}|${c.code}`, currentMatch);
         usedBunkers.add(currentMatch.c);
+        return;
+      }
+      const reusableAssignedBunker = Array.from(assignments.values()).find((bunker): bunker is Bunker =>
+        !!bunker && canUseExistingMaterialForRequested(bunker.m, bunker.mc, c.name, c.code)
+      );
+      if (reusableAssignedBunker) {
+        assignments.set(key, reusableAssignedBunker);
       }
     });
 
@@ -5810,15 +6382,28 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }
     bulkComponents.forEach(c => {
       const key = `${c.name}|${c.code}`;
       if (assignments.has(key)) return;
-
-      const possibleMatch = lineBunkers.find(b => 
-        !usedBunkers.has(b.c) && (
-          (b.ms && b.ms.some(m => m === c.name || materialsEquivalent(m, c.name))) ||
-          (b.materialData && Object.entries(b.materialData).some(([mName, mData]) => 
-            mName === c.name || materialsEquivalent(mName, c.name) || materialCodesEquivalent(mData.code, c.code)
-          ))
-        )
+      const reusableAssignedBunker = Array.from(assignments.values()).find((bunker): bunker is Bunker =>
+        !!bunker && canBunkerServeOrderComponent(bunker, c)
       );
+      if (reusableAssignedBunker) {
+        assignments.set(key, reusableAssignedBunker);
+        return;
+      }
+
+      const possibleMatch = lineBunkers
+        .filter(b => 
+          !usedBunkers.has(b.c) && (
+            (b.ms && b.ms.some(m => canUseExistingMaterialForRequested(m, null, c.name, c.code))) ||
+            (b.materialData && Object.entries(b.materialData).some(([mName, mData]) => 
+              canUseExistingMaterialForRequested(mName, mData.code, c.name, c.code)
+            ))
+          )
+        )
+        .sort((a, b) => {
+          const emptyDiff = Number(isBunkerEffectivelyEmpty(b)) - Number(isBunkerEffectivelyEmpty(a));
+          if (emptyDiff !== 0) return emptyDiff;
+          return a.c.localeCompare(b.c);
+        })[0];
       if (possibleMatch) {
         assignments.set(key, possibleMatch);
         usedBunkers.add(possibleMatch.c);
@@ -5843,8 +6428,9 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }
   }, [bulkComponents, bunkerAssignments]);
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={onClose}>
       <motion.div 
+        onClick={(e) => e.stopPropagation()}
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.95 }}

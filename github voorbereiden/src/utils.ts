@@ -124,6 +124,41 @@ export function materialCodesEquivalent(a: string | null | undefined, b: string 
   return aa === bb;
 }
 
+function normalizeMaterialNameKey(name: string | null | undefined): string {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/\(.*?\)/g, '')
+    .replace(/[^a-z0-9]+/g, '')
+    .trim();
+}
+
+let runtimeMaterialOverridePairs: Array<{ requestedCode: string; existingCode: string }> = [];
+
+export function setRuntimeMaterialOverrides(pairs: Array<{ requestedCode: string; existingCode: string }>) {
+  runtimeMaterialOverridePairs = pairs
+    .map(pair => ({
+      requestedCode: normalizeMaterialCode(pair.requestedCode),
+      existingCode: normalizeMaterialCode(pair.existingCode)
+    }))
+    .filter(pair => !!pair.requestedCode && !!pair.existingCode);
+}
+
+export function canUseExistingMaterialForRequested(
+  existingName: string | null | undefined,
+  existingCode: string | null | undefined,
+  requestedName: string | null | undefined,
+  requestedCode: string | null | undefined
+): boolean {
+  if (materialsEquivalent(existingName, requestedName)) return true;
+  if (materialCodesEquivalent(existingCode, requestedCode)) return true;
+
+  const existingCodeKey = normalizeMaterialCode(existingCode);
+  const requestedCodeKey = normalizeMaterialCode(requestedCode);
+  return runtimeMaterialOverridePairs.some(
+    pair => pair.requestedCode === requestedCodeKey && pair.existingCode === existingCodeKey
+  );
+}
+
 export function hasProlineCleaningTrigger(order: Pick<Order, 'customer' | 'recipe' | 'productName' | 'yZeile' | 'note'> | null | undefined): boolean {
   if (!order) return false;
   const haystack = [
@@ -157,8 +192,8 @@ export function swCount(a: Order | null, b: Order, bunkers: Bunker[]): number {
   b.components.forEach(c => {
     const unit = (c.unit || '').toUpperCase();
     const isInCalibration = bunkers.some(bnk => 
-      (bnk.ms && bnk.ms.some(m => materialsEquivalent(m, c.name))) ||
-      (bnk.materialData && Object.entries(bnk.materialData).some(([mName, mData]) => materialsEquivalent(mName, c.name) || mData.code === c.code))
+      (bnk.ms && bnk.ms.some(m => canUseExistingMaterialForRequested(m, null, c.name, c.code))) ||
+      (bnk.materialData && Object.entries(bnk.materialData).some(([mName, mData]) => canUseExistingMaterialForRequested(mName, mData.code, c.name, c.code)))
     );
     const isBulk = unit === 'M3' || unit === 'PERC' || unit === '' || isInCalibration;
     if (!isBulk) return;
@@ -171,8 +206,8 @@ export function swCount(a: Order | null, b: Order, bunkers: Bunker[]): number {
                                  (c.code && prevCodes.has(c.code)) ||
                                  currentBunkerMats.has(c.name.toLowerCase()) || 
                                  (c.code && currentBunkerCodes.has(c.code)) ||
-                                 Array.from(prevMats).some(m => materialsEquivalent(m, c.name)) ||
-                                 Array.from(currentBunkerMats).some(m => materialsEquivalent(m, c.name));
+                                 Array.from(prevMats).some(m => canUseExistingMaterialForRequested(m, null, c.name, c.code)) ||
+                                 Array.from(currentBunkerMats).some(m => canUseExistingMaterialForRequested(m, null, c.name, c.code));
 
     if (!isCurrentlyAvailable) {
       sw++;
@@ -200,8 +235,8 @@ export function getSwitchMaterials(a: Order | null, b: Order, bunkers: Bunker[])
   b.components.forEach(c => {
     const unit = (c.unit || '').toUpperCase();
     const isInCalibration = bunkers.some(bnk => 
-      (bnk.ms && bnk.ms.some(m => materialsEquivalent(m, c.name))) ||
-      (bnk.materialData && Object.entries(bnk.materialData).some(([mName, mData]) => materialsEquivalent(mName, c.name) || mData.code === c.code))
+      (bnk.ms && bnk.ms.some(m => canUseExistingMaterialForRequested(m, null, c.name, c.code))) ||
+      (bnk.materialData && Object.entries(bnk.materialData).some(([mName, mData]) => canUseExistingMaterialForRequested(mName, mData.code, c.name, c.code)))
     );
     const isBulk = unit === 'M3' || unit === 'PERC' || unit === '' || isInCalibration;
     if (!isBulk) return;
@@ -214,8 +249,8 @@ export function getSwitchMaterials(a: Order | null, b: Order, bunkers: Bunker[])
                                  (c.code && prevCodes.has(c.code)) ||
                                  currentBunkerMats.has(c.name.toLowerCase()) || 
                                  (c.code && currentBunkerCodes.has(c.code)) ||
-                                 Array.from(prevMats).some(m => materialsEquivalent(m, c.name)) ||
-                                 Array.from(currentBunkerMats).some(m => materialsEquivalent(m, c.name));
+                                 Array.from(prevMats).some(m => canUseExistingMaterialForRequested(m, null, c.name, c.code)) ||
+                                 Array.from(currentBunkerMats).some(m => canUseExistingMaterialForRequested(m, null, c.name, c.code));
 
     if (!isCurrentlyAvailable) {
       toLoad.push(c.name);

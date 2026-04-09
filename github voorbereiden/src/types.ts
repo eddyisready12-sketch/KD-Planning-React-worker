@@ -56,6 +56,9 @@ export interface Order {
   status: 'planned' | 'arrived' | 'running' | 'completed';
   rawStatus?: string;
   eta: string;
+  arrivedTime?: string;
+  startedAt?: string;
+  holdLoadTime?: boolean;
   note: string;
   arrived?: boolean;
   driver?: string;
@@ -103,4 +106,15 @@ export interface Storing {
   duur: number | null;
   start: Date;
   actief: boolean;
+}
+
+export interface PlannerTrigger {
+  key: string;
+  label: string;
+  description: string;
+  active: boolean;
+  fieldName?: string;
+  matchValue?: string;
+  actionName?: string;
+  targetLine?: string;
 }

@@ -1,4 +1,4 @@
-import { Bunker, LineId, Order, OrderComponent, Storing } from '../types';
+import { Bunker, LineId, Order, OrderComponent, PlannerTrigger, Storing } from '../types';
 import { normalizeEta, normalizePkg, parseNumber } from '../utils';
 import { supabase } from './supabaseClient';
 
@@ -19,6 +19,8 @@ type SharedOrderRow = {
   eta?: string | null;
   arrived?: boolean | null;
   arrived_time?: string | null;
+  started_at?: string | null;
+  hold_load_time?: boolean | null;
   status?: string | null;
   driver_name?: string | null;
   note?: string | null;
@@ -83,10 +85,51 @@ type SharedAppStateRow = {
   updated_at?: string | null;
 };
 
+type SharedTriggerRow = {
+  id?: string | null;
+  workspace?: string | null;
+  trigger_key?: string | null;
+  key?: string | null;
+  code?: string | null;
+  name?: string | null;
+  title?: string | null;
+  label?: string | null;
+  description?: string | null;
+  text?: string | null;
+  trigger_value?: string | number | boolean | null;
+  value?: string | number | boolean | null;
+  active?: boolean | null;
+  enabled?: boolean | null;
+  type?: string | null;
+};
+
 export type PlannerRecalcLockState = {
   owner: string | null;
   expiresAt: string | null;
 };
+
+function rowToPlannerTrigger(row: SharedTriggerRow): PlannerTrigger | null {
+  const actionName = String((row as { action_name?: string | null }).action_name || row.trigger_key || row.key || '').trim();
+  const fieldName = String((row as { field_name?: string | null }).field_name || '').trim();
+  const matchValue = String((row as { match_value?: string | null }).match_value || '').trim();
+  const targetLine = String((row as { target_line?: string | null }).target_line || '').trim();
+  const key = String(actionName || row.code || row.name || row.title || '').trim();
+  const label = String(row.label || row.title || row.name || key).trim();
+  const rawDescription = row.description ?? row.text ?? row.trigger_value ?? row.value ?? '';
+  const description = String(rawDescription ?? '').trim();
+  const active = row.active ?? row.enabled ?? true;
+  if (!key || !label) return null;
+  return {
+    key,
+    label,
+    description,
+    active: active !== false,
+    fieldName: fieldName || undefined,
+    matchValue: matchValue || undefined,
+    actionName: actionName || undefined,
+    targetLine: targetLine || undefined
+  };
+}
 
 function normalizeStatus(status: string | null | undefined, arrived?: boolean | null): Order['status'] {
   const normalized = String(status || '').trim().toLowerCase();
@@ -152,7 +195,10 @@ function rowToOrder(
     status,
     rawStatus: String(row.status || ''),
     arrived: !!row.arrived || status === 'arrived',
-    eta: normalizeEta(String(row.arrived_time || row.eta || '')),
+    eta: normalizeEta(String(row.eta || '')),
+    arrivedTime: normalizeEta(String(row.arrived_time || '')) || undefined,
+    startedAt: row.started_at ? String(row.started_at) : undefined,
+    holdLoadTime: !!row.hold_load_time,
     note: String(row.note || ''),
     driver: row.driver_name || undefined,
     yZeile: row.y_zeile || undefined,
@@ -335,7 +381,7 @@ export async function fetchOrdersFromSupabase(): Promise<Order[]> {
     .filter((order): order is Order => order !== null);
 }
 
-export async function writeOrdersToSupabase(orders: Order[]): Promise<void> {
+export async function writeOrdersToSupabase(orders: Order[], options?: { preserveExistingSchedule?: boolean }): Promise<void> {
   if (!isSupabaseConfigured() || orders.length === 0) return;
 
   const uniqueOrders = new Map<string, Order>();
@@ -343,11 +389,27 @@ export async function writeOrdersToSupabase(orders: Order[]): Promise<void> {
     uniqueOrders.set(`${SUPABASE_WORKSPACE}|${order.num}`, order);
   });
 
+  const existingDatesByOrderNum = new Map<string, string>();
+  if (options?.preserveExistingSchedule) {
+    const existingRows = await supabaseFetch<Array<Pick<SharedOrderRow, 'order_num' | 'order_date'>>>(
+      `shared_orders?workspace=eq.${encodeURIComponent(SUPABASE_WORKSPACE)}&select=order_num,order_date`
+    );
+    existingRows.forEach(row => {
+      const orderNum = String(row.order_num || '').trim();
+      const orderDate = String(row.order_date || '').trim();
+      if (orderNum && orderDate) {
+        existingDatesByOrderNum.set(orderNum, orderDate);
+      }
+    });
+  }
+
   const orderRows = Array.from(uniqueOrders.values()).map(order => {
     const normalizedPriority =
       order.pkg === 'bale' || order.pkg === 'bag'
         ? 1
-        : (order.status === 'arrived' && !!normalizeEta(order.eta) ? 1 : 2);
+        : (order.status === 'arrived' && !!normalizeEta(order.arrivedTime || order.eta) ? 1 : 2);
+    const preservedOrderDate =
+      (options?.preserveExistingSchedule ? existingDatesByOrderNum.get(order.num) : null) || order.date || null;
 
     return {
       workspace: SUPABASE_WORKSPACE,
@@ -361,13 +423,15 @@ export async function writeOrdersToSupabase(orders: Order[]): Promise<void> {
       volume: order.vol,
       eta: order.eta || null,
       arrived: !!order.arrived,
-      arrived_time: order.arrived ? (order.eta || null) : null,
+      arrived_time: order.arrived ? (order.arrivedTime || order.eta || null) : null,
+      started_at: order.startedAt || null,
+      hold_load_time: !!order.holdLoadTime,
       status: order.status,
       driver_name: order.driver || null,
       note: order.note || null,
       priority: normalizedPriority,
       y_zeile: order.yZeile || null,
-      order_date: order.date || null,
+      order_date: preservedOrderDate,
       updated_at: new Date().toISOString()
     };
   });
@@ -633,6 +697,45 @@ export async function fetchDriverListFromSupabase(): Promise<string[]> {
         .filter(Boolean)
     )
   ).sort((a, b) => a.localeCompare(b, 'nl-NL'));
+}
+
+export async function fetchPlannerTriggersFromSupabase(): Promise<PlannerTrigger[]> {
+  if (!isSupabaseConfigured()) return [];
+
+  const tryWithWorkspace = async (): Promise<PlannerTrigger[]> => {
+    const { data, error } = await supabase
+      .from('shared_triggers')
+      .select('*')
+      .eq('workspace', SUPABASE_WORKSPACE)
+      .order('id', { ascending: true });
+
+    if (error) throw error;
+    return (Array.isArray(data) ? data : [])
+      .map(row => rowToPlannerTrigger(row as SharedTriggerRow))
+      .filter((row): row is PlannerTrigger => row !== null);
+  };
+
+  const tryWithoutWorkspace = async (): Promise<PlannerTrigger[]> => {
+    const { data, error } = await supabase
+      .from('shared_triggers')
+      .select('*')
+      .order('id', { ascending: true });
+
+    if (error) throw error;
+    return (Array.isArray(data) ? data : [])
+      .map(row => rowToPlannerTrigger(row as SharedTriggerRow))
+      .filter((row): row is PlannerTrigger => row !== null);
+  };
+
+  try {
+    return await tryWithWorkspace();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || '');
+    if (/workspace/i.test(message) || /column/i.test(message)) {
+      return tryWithoutWorkspace();
+    }
+    throw new Error(`Triggers laden mislukt: ${message}`);
+  }
 }
 
 export async function writeDriverListToSupabase(driverNames: string[]): Promise<void> {
