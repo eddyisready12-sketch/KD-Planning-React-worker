@@ -27,15 +27,15 @@ const HEADER_MAP: Record<string, string[]> = {
   productionOrder: ['ProductieOrder', 'productieorder', 'productie_order', 'productionorder', 'prodorder', 'prod_order', 'po_nummer'],
   rit: ['Ritnummer', 'rit', 'trip', 'route', 'ritnummer', 'rit_nr', 'ritnr'],
   customer: ['Klantnaam', 'customer', 'klant', 'debiteur', 'naam', 'klantnaam', 'ontvanger'],
-  line: ['Menglijn', 'line', 'lijn', 'mixline', 'menglijn', 'lijn_nr', 'lijnnr'],
+  line: ['Menglijn', 'Meng-lijn', 'line', 'lijn', 'mixline', 'menglijn', 'lijn_nr', 'lijnnr'],
   date: ['Datum', 'datum', 'date', 'plandatum', 'planningsdatum'],
-  plannedQty: ['Geplande hoeveelheid', 'geplandehoeveelheid', 'plannedquantity', 'planned_qty', 'hoeveelheid'],
+  plannedQty: ['Geplande hoeveelheid', 'geplandehoeveelheid', 'plannedquantity', 'planned_qty', 'hoeveelheid', 'Gepland van geproduceerd', 'geplandvangeproduceerd'],
   plannedCount: ['Gepland aantal', 'geplandaantal', 'plannedcount', 'planned_count', 'aantal'],
   vol: ['Prod_Volume_M3', 'vol', 'volume', 'm3', 'inhoud', 'prodvolumem3', 'prod_volume_m3', 'orderaantal', 'hoeveelheid', 'aantal'],
   prio: ['prio', 'prioriteit', 'priority', 'urgentie'],
-  status: ['Status', 'status', 'orderstatus', 'statusorder', 'productiestatus', 'planningstatus'],
+  status: ['Status', 'status', 'orderstatus', 'statusorder', 'productiestatus', 'planningstatus', 'Productieorder status', 'productieorderstatus'],
   arrived: ['Gearriveerd', 'gearriveerd', 'Arriveerd', 'arriveerd', 'Aangekomen', 'aangekomen', 'arrived', 'isarrived', 'truck_arrived'],
-  eta: ['Laadtijd', 'eta', 'laadtijd', 'loadtime', 'tijd', 'aankomsttijd', 'tijdstip'],
+  eta: ['Geplande starttijd', 'geplande starttijd', 'geplandestarttijd', 'plannedstart', 'planned_start', 'Laadtijd', 'eta', 'laadtijd', 'loadtime', 'tijd', 'aankomsttijd', 'tijdstip'],
   note: ['note', 'notitie', 'opmerking', 'remarks', 'memo', 'bijzonderheden'],
   componentName: ['Component_Beschrijving', 'component_beschrijving', 'componentbeschrijving', 'component', 'grondstof', 'componentomschrijving', 'materiaal', 'naam'],
   componentCode: ['RAW_Code', 'raw_code', 'rawcode', 'grondstofnummer', 'grondstof_nummer', 'componentcode', 'art_code', 'code'],
@@ -113,7 +113,21 @@ function inferPkgFromImportedFields(unitRaw: string, productRaw: string): Order[
   return normalizePkg(unitRaw);
 }
 
-function parseCsvLine(line: string): string[] {
+function detectCsvDelimiter(headerLine: string): ',' | ';' | '\t' {
+  const separators: Array<',' | ';' | '\t'> = [',', ';', '\t'];
+  let best: ',' | ';' | '\t' = ',';
+  let bestCount = -1;
+  separators.forEach(separator => {
+    const count = headerLine.split(separator).length - 1;
+    if (count > bestCount) {
+      best = separator;
+      bestCount = count;
+    }
+  });
+  return best;
+}
+
+function parseCsvLine(line: string, delimiter: ',' | ';' | '\t' = ','): string[] {
   const result: string[] = [];
   let current = '';
   let inQuotes = false;
@@ -132,7 +146,7 @@ function parseCsvLine(line: string): string[] {
       continue;
     }
 
-    if (char === ',' && !inQuotes) {
+    if (char === delimiter && !inQuotes) {
       result.push(current);
       current = '';
       continue;
@@ -145,9 +159,18 @@ function parseCsvLine(line: string): string[] {
   return result.map(value => value.trim());
 }
 
+function normalizeImportedStatus(value: string): Order['status'] {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'closed' || normalized === 'completed' || normalized === 'voltooid') return 'completed';
+  if (normalized === 'running' || normalized === 'gestart') return 'running';
+  if (normalized === 'arrived' || normalized === 'gearriveerd') return 'arrived';
+  return 'planned';
+}
+
 function buildOrderFromValues(
   getValue: (key: string) => string,
-  fallbackLine?: LineId
+  fallbackLine?: LineId,
+  fallbackDate?: string
 ): Order | null {
   const recipe = getValue('recipe');
   const orderNum = getValue('orderNum');
@@ -171,7 +194,10 @@ function buildOrderFromValues(
 
   const pkg = inferPkgFromImportedFields(getValue('pkg'), getValue('productName'));
   const rawStatus = getValue('status');
+  const normalizedStatus = normalizeImportedStatus(rawStatus);
   const prio = (pkg === 'bale' || pkg === 'bag') ? 1 : (parseInt(getValue('prio'), 10) || 2);
+
+  const normalizedDate = normalizeSheetDate(getValue('date')) || String(fallbackDate || '').trim();
 
   return {
     id: 0,
@@ -184,15 +210,15 @@ function buildOrderFromValues(
     vol: isNaN(vol) ? 0 : vol,
     pkg,
     prio: prio as any,
-    status: 'planned' as any,
+    status: normalizedStatus,
     rawStatus,
-    arrived: false,
-    eta: '',
+    arrived: normalizedStatus === 'arrived',
+    eta: normalizeEta(getValue('eta')),
     note: getValue('note'),
     driver: getValue('driver'),
     yZeile: getValue('yZeile'),
     productName: getValue('productName'),
-    date: normalizeSheetDate(getValue('date')),
+    date: normalizedDate,
     components: component ? [component] : []
   };
 }
@@ -322,30 +348,35 @@ export async function fetchOrdersFromSheet(url: string): Promise<Order[]> {
   });
 }
 
-export async function importOrdersFromCsvFile(file: File): Promise<Order[]> {
+export async function importOrdersFromCsvFile(file: File, fallbackDate?: string): Promise<Order[]> {
   const text = await file.text();
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(line => line.trim().length > 0);
   if (lines.length < 2) return [];
 
-  const rawHeaders = parseCsvLine(lines[0]);
+  const delimiter = detectCsvDelimiter(lines[0]);
+  const rawHeaders = parseCsvLine(lines[0], delimiter);
   const indices: Record<string, number> = {};
   Object.entries(HEADER_MAP).forEach(([key, aliases]) => {
     indices[key] = getColumnIndex(rawHeaders, aliases);
   });
 
   const importedRows = lines.slice(1).map((line, idx) => {
-    const values = parseCsvLine(line);
+    const values = parseCsvLine(line, delimiter);
     const getValue = (key: string) => {
       const colIdx = indices[key];
       if (colIdx === undefined || colIdx === -1) return '';
       return String(values[colIdx] ?? '').trim();
     };
-    const order = buildOrderFromValues(getValue);
+    const order = buildOrderFromValues(getValue, undefined, fallbackDate);
     if (order) {
       order.id = 200000 + idx;
     }
     return order;
   }).filter((o): o is Order => o !== null);
+
+  if (importedRows.length === 0) {
+    throw new Error('Geen geldige orders gevonden in CSV. Controleer kolommen zoals Meng-lijn, Order Nummer en Item / recept.');
+  }
 
   const collapsed = new Map<string, Order>();
   importedRows.forEach(row => {
