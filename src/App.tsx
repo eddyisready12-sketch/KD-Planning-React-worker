@@ -3626,11 +3626,6 @@ export default function App() {
     [dayRosterColumns]
   );
 
-  const dayRosterUnassignedColumn = useMemo(
-    () => dayRosterColumns.find(column => column.isUnassigned) || null,
-    [dayRosterColumns]
-  );
-
   const dayRosterUnassignedEntries = useMemo(
     () => dayRosterEntries.filter(entry => entry.isUnassigned),
     [dayRosterEntries]
@@ -4921,17 +4916,32 @@ export default function App() {
                           </div>
                         ) : (
                           <div className="flex min-h-[720px]">
-                            <div className="w-[320px] shrink-0 border-r border-gray-200 bg-gray-50/60">
+                            <div
+                              className={`w-[320px] shrink-0 border-r border-gray-200 bg-gray-50/60 transition-colors ${draggedDayRosterOrderId ? 'bg-orange-50/80 ring-1 ring-inset ring-orange-200' : ''}`}
+                              onDragOver={(e) => {
+                                e.preventDefault();
+                                e.dataTransfer.dropEffect = 'move';
+                              }}
+                              onDrop={(e) => {
+                                e.preventDefault();
+                                const rawId = e.dataTransfer.getData('text/dayroster-order-id') || String(draggedDayRosterOrderId || '');
+                                const orderId = Number(rawId);
+                                if (orderId) {
+                                  void handleClearDriverFromOrder(orderId);
+                                }
+                                setDraggedDayRosterOrderId(null);
+                              }}
+                            >
                               <div className="border-b border-gray-200 px-4 py-3">
                                 <div className="text-sm font-bold text-gray-800">Ongekoppelde orders</div>
                                 <div className="mt-1 text-xs text-gray-500">
-                                  Sleep een order naar een chauffeurkolom om hem toe te wijzen. Toegewezen orders verdwijnen hier direct.
+                                  Sleep een order naar een chauffeurkolom. Sleep hem terug hierheen om hem weer los te koppelen.
                                 </div>
                               </div>
                               <div className="max-h-[720px] overflow-auto px-3 py-3 space-y-3">
                                 {dayRosterUnassignedEntries.length === 0 ? (
                                   <div className="rounded-xl border border-dashed border-gray-200 bg-white px-4 py-5 text-sm italic text-gray-400">
-                                    Geen ongekoppelde orders voor deze dag.
+                                    {draggedDayRosterOrderId ? 'Laat hier los om terug te zetten.' : 'Geen ongekoppelde orders voor deze dag.'}
                                   </div>
                                 ) : (
                                   dayRosterUnassignedEntries.map(entry => (
@@ -4973,7 +4983,7 @@ export default function App() {
                             <div className="min-w-0 flex-1 overflow-auto">
                               <div
                                 className="grid min-w-[880px]"
-                                style={{ gridTemplateColumns: `88px repeat(${dayRosterDriverColumns.length + (dayRosterUnassignedColumn ? 1 : 0)}, minmax(180px, 1fr))` }}
+                                style={{ gridTemplateColumns: `88px repeat(${dayRosterDriverColumns.length}, minmax(180px, 1fr))` }}
                               >
                                 <div className="sticky top-0 z-20 bg-white border-b border-r border-gray-200 px-3 py-3 text-xs font-bold uppercase tracking-wider text-gray-400">
                                   Tijd
@@ -5005,33 +5015,6 @@ export default function App() {
                                     )}
                                   </div>
                                 ))}
-                                {dayRosterUnassignedColumn && (
-                                  <div
-                                    key={dayRosterUnassignedColumn.key}
-                                    className={`sticky top-0 z-20 border-b border-r border-gray-200 bg-white px-3 py-3 transition-colors ${draggedDayRosterOrderId ? 'bg-orange-50/70 ring-1 ring-inset ring-orange-200' : ''}`}
-                                    onDragOver={(e) => e.preventDefault()}
-                                    onDrop={(e) => {
-                                      e.preventDefault();
-                                      const rawId = e.dataTransfer.getData('text/dayroster-order-id') || String(draggedDayRosterOrderId || '');
-                                      const orderId = Number(rawId);
-                                      if (orderId) {
-                                        void handleClearDriverFromOrder(orderId);
-                                      }
-                                      setDraggedDayRosterOrderId(null);
-                                    }}
-                                  >
-                                    <div className="text-sm font-bold text-gray-800">Ongekoppeld</div>
-                                    <div className="mt-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">
-                                      Nog geen chauffeur
-                                    </div>
-                                    {draggedDayRosterOrderId && (
-                                      <div className="mt-2 text-[11px] font-medium text-orange-600">
-                                        Sleep hierheen om los te koppelen
-                                      </div>
-                                    )}
-                                  </div>
-                                )}
-
                                 <div className="relative border-r border-gray-200 bg-gray-50/70">
                                   {dayRosterTimeSlots.map((slot) => (
                                     <div
@@ -5044,7 +5027,7 @@ export default function App() {
                                   ))}
                                 </div>
 
-                                {[...dayRosterDriverColumns, ...(dayRosterUnassignedColumn ? [dayRosterUnassignedColumn] : [])].map(column => {
+                                {dayRosterDriverColumns.map(column => {
                                   const entries = dayRosterOrdersPerColumn.get(column.key) || [];
                                   return (
                                     <div
@@ -5057,13 +5040,9 @@ export default function App() {
                                         const rawId = e.dataTransfer.getData('text/dayroster-order-id') || String(draggedDayRosterOrderId || '');
                                         const orderId = Number(rawId);
                                         if (!orderId) return;
-                                        if (column.isUnassigned) {
-                                          void handleClearDriverFromOrder(orderId);
-                                        } else {
-                                          const driverName = column.key.replace('driver:', '');
-                                          if (driverName) {
-                                            void handleAssignDriverToOrder(orderId, driverName);
-                                          }
+                                        const driverName = column.key.replace('driver:', '');
+                                        if (driverName) {
+                                          void handleAssignDriverToOrder(orderId, driverName);
                                         }
                                         setDraggedDayRosterOrderId(null);
                                       }}
