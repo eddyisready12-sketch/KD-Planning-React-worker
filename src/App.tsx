@@ -939,8 +939,9 @@ export default function App() {
     if (!isSupabaseConfigured()) return;
 
     const interval = window.setInterval(() => {
+      if (document.hidden) return;
       refreshBunkersFromSupabase();
-    }, 15000);
+    }, 900000);
 
     const handleVisibilityOrFocus = () => {
       refreshBunkersFromSupabase();
@@ -6371,7 +6372,7 @@ export default function App() {
                   <h2 className="text-sm font-bold mb-3.5">Synchronisatie</h2>
                   <div className="flex items-center justify-between gap-4">
                     <div className="text-xs text-gray-500">
-                      Orders lopen realtime via Supabase. Nieuwe bronorders worden automatisch elke 15 minuten opgehaald, of handmatig met deze knop.
+                      Realtime Supabase is leidend. Auto-sync draait elke 15 minuten als vangnet en wordt rood gemeld als er iets misgaat. Gebruik handmatig verversen alleen bij twijfel.
                     </div>
                     <button
                       type="button"
@@ -6380,11 +6381,11 @@ export default function App() {
                       disabled={dataSource.loading || isImportingCsv || isClearingOrders}
                     >
                       <RefreshCw size={14} className={dataSource.loading ? 'animate-spin' : ''} />
-                      {dataSource.loading ? 'Bezig...' : 'Sync Orders'}
+                      {dataSource.loading ? 'Bezig...' : 'Nood-sync orders'}
                     </button>
                   </div>
                   <div className="mt-3 text-[11px] text-gray-400">
-                    Laatste sync: {dataSource.lastSync ? new Date(dataSource.lastSync).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' }) : 'Nog niet'}
+                    Laatste vangnet-sync: {dataSource.lastSync ? new Date(dataSource.lastSync).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' }) : 'Nog niet'}
                   </div>
                 </div>
 
