@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
   LineId, Order, Bunker, Melding, Storing, AppConfig, Truck, PlannerTrigger, OrderComponent 
 } from './types';
@@ -119,6 +119,22 @@ function formatPlannerDateChip(date: Date): string {
   });
 }
 
+function formatPlannerDateLong(date: Date): string {
+  return date.toLocaleDateString('nl-NL', {
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric'
+  });
+}
+
+function minutesToTimeString(totalMinutes: number): string {
+  const safeMinutes = Math.max(0, totalMinutes);
+  const hours = Math.floor(safeMinutes / 60);
+  const minutes = safeMinutes % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
 function formatOperatorDateTimeRange(start: Date, end: Date, currentTime: Date): string {
   const startDate = formatLocalDate(start);
   const endDate = formatLocalDate(end);
@@ -216,7 +232,7 @@ function mergeSharedCalibrationIntoBunkers(
 
 export default function App() {
   const [view, setView] = useState<'operator' | 'planner' | 'bunkers' | 'settings' | 'notifications'>('operator');
-  const [plannerTab, setPlannerTab] = useState<'schema' | 'wachtrij' | 'chauffeurs' | 'vrachtwagens' | 'voltooid'>('schema');
+  const [plannerTab, setPlannerTab] = useState<'schema' | 'dagrooster' | 'wachtrij' | 'chauffeurs' | 'vrachtwagens' | 'voltooid'>('schema');
   const [selectedLine, setSelectedLine] = useState<LineId>(() => {
     const saved = localStorage.getItem('kd_selected_line');
     return saved ? (parseInt(saved, 10) as LineId) : 1;
@@ -243,6 +259,7 @@ export default function App() {
   const [gapDebug, setGapDebug] = useState<GapDebugEntry[]>([]);
   const [selectedDriverName, setSelectedDriverName] = useState<string>('');
   const [draggedDriverName, setDraggedDriverName] = useState<string>('');
+  const [draggedDayRosterOrderId, setDraggedDayRosterOrderId] = useState<number | null>(null);
   const [sharedDriverNames, setSharedDriverNames] = useState<string[]>([]);
   const [plannerTriggers, setPlannerTriggers] = useState<PlannerTrigger[]>([]);
   const [newDriverName, setNewDriverName] = useState('');
@@ -861,7 +878,7 @@ export default function App() {
       .channel('kd-drivers-live')
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'shared_app_state' },
+        { event: '*', schema: 'public', table: 'shared_drivers' },
         refreshDriversFromSupabase
       )
       .subscribe();
@@ -946,6 +963,8 @@ export default function App() {
         // keep current local state if realtime refresh fails
       }
     };
+
+    void refreshOrdersFromSupabase();
 
     const channel = supabase
       .channel('kd-orders-live')
@@ -1251,20 +1270,26 @@ export default function App() {
 
   useEffect(() => {
     if (!isSupabaseConfigured()) return;
+    if (sharedDriverNames.length > 0) return;
+    if (orderDriverNames.length === 0) return;
 
-    const merged = Array.from(new Set([...sharedDriverNames, ...orderDriverNames]))
+    const seededDrivers = Array.from(new Set(orderDriverNames))
+      .map(name => String(name || '').trim())
+      .filter(Boolean)
       .sort((a, b) => a.localeCompare(b, 'nl-NL'));
-    const current = sharedDriverNames.slice().sort((a, b) => a.localeCompare(b, 'nl-NL'));
-    const unchanged = merged.length === current.length && merged.every((name, index) => name === current[index]);
-    if (unchanged) return;
 
-    writeDriverListToSupabase(merged).catch((err) => {
-      const errorMsg = err instanceof Error ? err.message : 'Chauffeurs sync mislukt';
+    if (seededDrivers.length === 0) return;
+
+    setSharedDriverNames(seededDrivers);
+    setDriverSyncDebug(`Supabase chauffeurs gevuld uit orderdata: ${seededDrivers.length}`);
+
+    writeDriverListToSupabase(seededDrivers).catch((err) => {
+      const errorMsg = err instanceof Error ? err.message : 'Chauffeurs initieel vullen mislukt';
       setNotifications(prev => [{
         id: Date.now(),
         type: 'fout',
         icon: 'ERR',
-        titel: 'Chauffeurs sync mislukt',
+        titel: 'Chauffeurs initieel vullen mislukt',
         tekst: errorMsg,
         lijn: null,
         orderNum: null,
@@ -1273,6 +1298,13 @@ export default function App() {
       }, ...prev]);
     });
   }, [orderDriverNames, sharedDriverNames]);
+
+  const dayRosterBaseDrivers = useMemo(() => {
+    const supabaseDrivers = sharedDriverNames
+      .map(name => String(name || '').trim())
+      .filter(Boolean);
+    return Array.from(new Set(supabaseDrivers));
+  }, [sharedDriverNames]);
 
   async function persistIssue(line: LineId, issue: Storing | null) {
     setStoringen(prev => ({ ...prev, [line]: issue }));
@@ -1471,7 +1503,7 @@ export default function App() {
         const orderDay = parseLocalDate(order.date) || anchorDay;
         const dayOffsetMinutes = Math.round((orderDay.getTime() - anchorDay.getTime()) / 86400000) * 1440;
         let startMinutes = current;
-        const eta = normalizeEta(order.eta);
+        const eta = getOrderLoadReferenceTime(order);
         const etaMinutes = eta ? dayOffsetMinutes + timeStringToMinutes(eta, baseDayStart) : null;
         if (index === 0) {
           startMinutes = dayOffsetMinutes + firstOrderStart;
@@ -1529,7 +1561,7 @@ export default function App() {
       const transitionMinutes = getTransitionMinutes(lid, prevOrder, order, lineBunkers);
       const slot = rt(order, speed) + transitionMinutes;
       let startMinutes = current;
-      const eta = normalizeEta(order.eta);
+      const eta = getOrderLoadReferenceTime(order);
       const etaMinutes = eta ? timeStringToMinutes(eta, baseDayStart) - baseDayStart : null;
 
       if (index === 0) {
@@ -1573,7 +1605,7 @@ export default function App() {
       const starts = getScheduledStartsForLine(planToCheck, lid);
       for (let index = 0; index < planToCheck.length; index++) {
         const order = planToCheck[index];
-        const eta = normalizeEta(order.eta);
+        const eta = getOrderLoadReferenceTime(order);
       if (!eta) continue;
 
         const prevOrder = index > 0 ? planToCheck[index - 1] : null;
@@ -2044,6 +2076,13 @@ export default function App() {
     return [1, 2, 3].includes(order.prio) ? order.prio : 2;
   };
 
+  const getLoadHoldSequenceRank = useCallback((order: Order): number => {
+    const normalizedEta = normalizeEta(order.eta);
+    if (getEffectivePriority(order) === 1 && normalizedEta === effectiveFirstOrderStart) return 2;
+    if (order.status === 'arrived' && !!order.holdLoadTime) return 1;
+    return 0;
+  }, [effectiveFirstOrderStart, getEffectivePriority]);
+
   const getOrderContentMetrics = useCallback((prev: Order | null, order: Order, lid: LineId) => {
     const lineBunkers = bunkers[lid];
     const prevComponents = prev?.components || [];
@@ -2351,6 +2390,24 @@ export default function App() {
     const fixedFirstEtaMins = etaToMins(fixedFirstEta) ?? 15;
 
     if (!current && pool.length > 0) {
+      const fixedFirstCandidates = pool
+        .map((order, index) => ({ order, index }))
+        .filter(({ order }) => getEffectivePriority(order) === 1 && normalizeEta(order.eta) === fixedFirstEta);
+
+      if (fixedFirstCandidates.length > 0) {
+        fixedFirstCandidates.sort((a, b) => {
+          const aBulkPenalty = a.order.pkg === 'bulk' ? 1 : 0;
+          const bBulkPenalty = b.order.pkg === 'bulk' ? 1 : 0;
+          if (aBulkPenalty !== bBulkPenalty) return aBulkPenalty - bBulkPenalty;
+          return ev(a.order) - ev(b.order);
+        });
+        const picked = pool.splice(fixedFirstCandidates[0].index, 1)[0];
+        plan.push(picked);
+        current = picked;
+      }
+    }
+
+    if (!current && pool.length > 0) {
       const holdLoadCandidates = pool
         .map((order, index) => ({ order, index }))
         .filter(({ order }) => order.status === 'arrived' && !!order.holdLoadTime);
@@ -2371,19 +2428,22 @@ export default function App() {
       }
     }
 
-    if (!current && pool.length > 0) {
-      const fixedFirstCandidates = pool
+    if (plan.length === 1 && pool.length > 0) {
+      const anchoredHoldLoadCandidates = pool
         .map((order, index) => ({ order, index }))
-        .filter(({ order }) => getEffectivePriority(order) === 1 && normalizeEta(order.eta) === fixedFirstEta);
+        .filter(({ order }) => order.status === 'arrived' && !!order.holdLoadTime);
 
-      if (fixedFirstCandidates.length > 0) {
-        fixedFirstCandidates.sort((a, b) => {
-          const aBulkPenalty = a.order.pkg === 'bulk' ? 1 : 0;
-          const bBulkPenalty = b.order.pkg === 'bulk' ? 1 : 0;
-          if (aBulkPenalty !== bBulkPenalty) return aBulkPenalty - bBulkPenalty;
+      if (anchoredHoldLoadCandidates.length > 0) {
+        anchoredHoldLoadCandidates.sort((a, b) => {
+          const etaA = etaToMins(getOrderLoadReferenceTime(a.order)) || 9999;
+          const etaB = etaToMins(getOrderLoadReferenceTime(b.order)) || 9999;
+          if (etaA !== etaB) return etaA - etaB;
+          const swA = swCount(current, a.order, bunkers[lid]);
+          const swB = swCount(current, b.order, bunkers[lid]);
+          if (swA !== swB) return swA - swB;
           return ev(a.order) - ev(b.order);
         });
-        const picked = pool.splice(fixedFirstCandidates[0].index, 1)[0];
+        const picked = pool.splice(anchoredHoldLoadCandidates[0].index, 1)[0];
         plan.push(picked);
         current = picked;
       }
@@ -2412,14 +2472,14 @@ export default function App() {
     while (pool.length > 0) {
       const arrivedEtaCandidates = pool
         .map((order, index) => ({ order, index }))
-        .filter(({ order }) => order.status === 'arrived' && !!normalizeEta(order.eta));
+        .filter(({ order }) => order.status === 'arrived' && !!getOrderLoadReferenceTime(order));
 
       if (arrivedEtaCandidates.length > 0) {
         arrivedEtaCandidates.sort((a, b) => {
           const holdDiff = Number(!!b.order.holdLoadTime) - Number(!!a.order.holdLoadTime);
           if (holdDiff !== 0) return holdDiff;
-          const etaA = etaToMins(normalizeEta(a.order.eta)) || 9999;
-          const etaB = etaToMins(normalizeEta(b.order.eta)) || 9999;
+          const etaA = etaToMins(getOrderLoadReferenceTime(a.order)) || 9999;
+          const etaB = etaToMins(getOrderLoadReferenceTime(b.order)) || 9999;
           if (etaA !== etaB) return etaA - etaB;
           const swA = swCount(current, a.order, bunkers[lid]);
           const swB = swCount(current, b.order, bunkers[lid]);
@@ -3368,10 +3428,8 @@ export default function App() {
         plannerState: getPlannerOrderState(entry.order, index, lineEntries, nowMinutes)
       }))
       .sort((a, b) => {
-        const holdDiff =
-          Number(b.order.status === 'arrived' && !!b.order.holdLoadTime) -
-          Number(a.order.status === 'arrived' && !!a.order.holdLoadTime);
-        if (holdDiff !== 0) return holdDiff;
+        const blockDiff = getLoadHoldSequenceRank(b.order) - getLoadHoldSequenceRank(a.order);
+        if (blockDiff !== 0) return blockDiff;
         const rankDiff = rank[a.plannerState.key] - rank[b.plannerState.key];
         if (rankDiff !== 0) return rankDiff;
         const prioDiff = getEffectivePriority(a.order) - getEffectivePriority(b.order);
@@ -3406,7 +3464,7 @@ export default function App() {
         plannerState: getPlannerOrderState(order, index, prioritizedEntries as unknown as ScheduledLineEntry[], nowMinutes)
       };
     });
-  }, [currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes]);
+  }, [currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, getLoadHoldSequenceRank, getEffectivePriority]);
 
   const plannerDisplayEntriesByLine = useMemo(() => ({
     1: getPlannerDisplayEntries(lineTimelineByLine[1]),
@@ -3449,6 +3507,135 @@ export default function App() {
     3: new Map(filteredPlannerDisplayEntriesByLine[3].map((entry, index) => [entry.order.id, index]))
   }), [filteredPlannerDisplayEntriesByLine]);
 
+  const dayRosterStartMinutes = 5 * 60 + 15;
+  const dayRosterEndMinutes = 23 * 60;
+  const dayRosterSlotMinutes = 15;
+  const dayRosterRowHeight = 42;
+  const dayRosterSlotCount = Math.floor((dayRosterEndMinutes - dayRosterStartMinutes) / dayRosterSlotMinutes) + 1;
+  const dayRosterTimeSlots = useMemo(
+    () => Array.from({ length: dayRosterSlotCount }, (_, index) => dayRosterStartMinutes + index * dayRosterSlotMinutes),
+    [dayRosterSlotCount]
+  );
+
+  const dayRosterEntries = useMemo(() => {
+    const search = plannerSearch.trim().toLowerCase();
+    return lineIds
+      .filter(lid => plannerLineFilter === 0 || lid === plannerLineFilter)
+      .flatMap(lid =>
+        filteredPlannerDisplayEntriesByLine[lid]
+          .filter(entry => {
+            if (!search) return true;
+            const o = entry.order;
+            return (
+              o.customer.toLowerCase().includes(search) ||
+              o.num.includes(search) ||
+              o.recipe.toLowerCase().includes(search) ||
+              String(o.driver || '').toLowerCase().includes(search) ||
+              String(o.rit || '').toLowerCase().includes(search)
+            );
+          })
+          .map(entry => {
+            const startMinutes = entry.prodStart.getHours() * 60 + entry.prodStart.getMinutes();
+            const endMinutes = entry.endTime.getHours() * 60 + entry.endTime.getMinutes();
+            const driverName = String(entry.order.driver || '').trim();
+            const columnKey = driverName ? `driver:${driverName}` : 'unassigned';
+            const columnLabel = driverName ? driverName : 'Ongekoppeld';
+            return {
+              ...entry,
+              startMinutes,
+              endMinutes,
+              columnKey,
+              columnLabel,
+              isUnassigned: !driverName
+            };
+          })
+      )
+      .sort((a, b) => {
+        if (a.startMinutes !== b.startMinutes) return a.startMinutes - b.startMinutes;
+        if (a.order.line !== b.order.line) return a.order.line - b.order.line;
+        return a.order.customer.localeCompare(b.order.customer, 'nl-NL');
+      });
+  }, [filteredPlannerDisplayEntriesByLine, lineIds, plannerLineFilter, plannerSearch]);
+
+  const dayRosterColumns = useMemo(() => {
+    const assignedDrivers = Array.from(new Set(
+      dayRosterEntries
+        .map(entry => String(entry.order.driver || '').trim())
+        .filter(Boolean)
+    ));
+    const preferredDrivers = Array.from(new Set(
+      [...dayRosterBaseDrivers, ...assignedDrivers]
+        .map(name => String(name || '').trim())
+        .filter(Boolean)
+    ));
+    const columnMap = new Map<string, { key: string; label: string; isUnassigned: boolean; firstStart: number; line: LineId }>();
+
+    preferredDrivers.forEach(driverName => {
+      const firstEntry = dayRosterEntries.find(entry => entry.columnKey === `driver:${driverName}`);
+      columnMap.set(`driver:${driverName}`, {
+        key: `driver:${driverName}`,
+        label: driverName,
+        isUnassigned: false,
+        firstStart: firstEntry?.startMinutes ?? 9999,
+        line: firstEntry?.order.line ?? 1
+      });
+    });
+
+    dayRosterEntries.forEach(entry => {
+      const existing = columnMap.get(entry.columnKey);
+      if (!existing) {
+        columnMap.set(entry.columnKey, {
+          key: entry.columnKey,
+          label: entry.columnLabel,
+          isUnassigned: entry.isUnassigned,
+          firstStart: entry.startMinutes,
+          line: entry.order.line
+        });
+      } else if (entry.startMinutes < existing.firstStart) {
+        existing.firstStart = entry.startMinutes;
+      }
+    });
+    return Array.from(columnMap.values()).sort((a, b) => {
+      if (a.isUnassigned !== b.isUnassigned) return Number(a.isUnassigned) - Number(b.isUnassigned);
+      const aDefaultIndex = dayRosterBaseDrivers.findIndex(name => name === a.label);
+      const bDefaultIndex = dayRosterBaseDrivers.findIndex(name => name === b.label);
+      if (aDefaultIndex !== -1 || bDefaultIndex !== -1) {
+        if (aDefaultIndex === -1) return 1;
+        if (bDefaultIndex === -1) return -1;
+        if (aDefaultIndex !== bDefaultIndex) return aDefaultIndex - bDefaultIndex;
+      }
+      if (a.firstStart !== b.firstStart) return a.firstStart - b.firstStart;
+      if (a.line !== b.line) return a.line - b.line;
+      return a.label.localeCompare(b.label, 'nl-NL');
+    });
+  }, [dayRosterBaseDrivers, dayRosterEntries]);
+
+  const dayRosterOrdersPerColumn = useMemo(() => {
+    const map = new Map<string, typeof dayRosterEntries>();
+    dayRosterColumns.forEach(column => {
+      map.set(
+        column.key,
+        dayRosterEntries.filter(entry => entry.columnKey === column.key)
+      );
+    });
+    return map;
+  }, [dayRosterColumns, dayRosterEntries]);
+
+  const dayRosterDriverColumns = useMemo(
+    () => dayRosterColumns.filter(column => !column.isUnassigned),
+    [dayRosterColumns]
+  );
+
+  const dayRosterUnassignedColumn = useMemo(
+    () => dayRosterColumns.find(column => column.isUnassigned) || null,
+    [dayRosterColumns]
+  );
+
+  const dayRosterUnassignedEntries = useMemo(
+    () => dayRosterEntries.filter(entry => entry.isUnassigned),
+    [dayRosterEntries]
+  );
+
   const visiblePlannerTriggers = activePlannerTriggerRows;
 
   const operatorDisplayEntries = useMemo(() => {
@@ -3462,10 +3649,8 @@ export default function App() {
           operatorState: getOperatorOrderState(entry.order, index, nowMinutes)
         }))
       .sort((a, b) => {
-        const holdDiff =
-          Number(b.order.status === 'arrived' && !!b.order.holdLoadTime) -
-          Number(a.order.status === 'arrived' && !!a.order.holdLoadTime);
-        if (holdDiff !== 0) return holdDiff;
+        const blockDiff = getLoadHoldSequenceRank(b.order) - getLoadHoldSequenceRank(a.order);
+        if (blockDiff !== 0) return blockDiff;
         const rankDiff = rank[a.operatorState.key] - rank[b.operatorState.key];
         if (rankDiff !== 0) return rankDiff;
           const prioDiff = getEffectivePriority(a.order) - getEffectivePriority(b.order);
@@ -3518,7 +3703,7 @@ export default function App() {
           operatorState: getOperatorOrderState(order, index, nowMinutes)
         };
       });
-    }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd]);
+    }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getLoadHoldSequenceRank, getEffectivePriority]);
 
   const nextOperatorOrder = useMemo(
     () => operatorDisplayEntries[0]?.order || null,
@@ -3950,6 +4135,17 @@ export default function App() {
       return order;
     });
     await persistOrders(nextOrders, 'Chauffeur sync mislukt', target.line, target.num);
+  };
+
+  const handleDayRosterDragStart = (e: React.DragEvent<HTMLElement>, orderId: number) => {
+    e.dataTransfer.setData('text/plain', String(orderId));
+    e.dataTransfer.setData('text/dayroster-order-id', String(orderId));
+    e.dataTransfer.effectAllowed = 'move';
+    setDraggedDayRosterOrderId(orderId);
+  };
+
+  const handleDayRosterDragEnd = () => {
+    setDraggedDayRosterOrderId(null);
   };
 
   const handleRemoveCompletedOrder = (id: number) => {
@@ -4627,6 +4823,7 @@ export default function App() {
                   <div className="flex overflow-x-auto no-scrollbar">
                     {[
                       { id: 'schema', lbl: 'Lijn Schema' },
+                      { id: 'dagrooster', lbl: 'Dagrooster' },
                       { id: 'wachtrij', lbl: 'Order Wachtrij' },
                       { id: 'chauffeurs', lbl: `Chauffeurs (${plannerDrivers.length})` },
                       { id: 'vrachtwagens', lbl: 'Vrachtwagenritten' },
@@ -4704,6 +4901,235 @@ export default function App() {
                     exit={{ opacity: 0, x: -10 }}
                     transition={{ duration: 0.15 }}
                   >
+                    {plannerTab === 'dagrooster' && (
+                      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
+                        <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/70 flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <div className="text-base font-bold text-gray-800">Dagrooster</div>
+                            <div className="text-sm text-gray-500">
+                              Eerste opzet voor planners: sleep orders links naar de juiste chauffeurkolom rechts.
+                            </div>
+                          </div>
+                          <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                            {formatPlannerDateLong(parseLocalDate(plannerSelectedDate) || currentTime)}
+                          </div>
+                        </div>
+
+                        {dayRosterColumns.length === 0 && dayRosterEntries.length === 0 ? (
+                          <div className="px-6 py-14 text-center text-gray-400 italic">
+                            Geen plannerblokken voor deze dag of filter.
+                          </div>
+                        ) : (
+                          <div className="flex min-h-[720px]">
+                            <div className="w-[320px] shrink-0 border-r border-gray-200 bg-gray-50/60">
+                              <div className="border-b border-gray-200 px-4 py-3">
+                                <div className="text-sm font-bold text-gray-800">Ongekoppelde orders</div>
+                                <div className="mt-1 text-xs text-gray-500">
+                                  Sleep een order naar een chauffeurkolom om hem toe te wijzen. Toegewezen orders verdwijnen hier direct.
+                                </div>
+                              </div>
+                              <div className="max-h-[720px] overflow-auto px-3 py-3 space-y-3">
+                                {dayRosterUnassignedEntries.length === 0 ? (
+                                  <div className="rounded-xl border border-dashed border-gray-200 bg-white px-4 py-5 text-sm italic text-gray-400">
+                                    Geen ongekoppelde orders voor deze dag.
+                                  </div>
+                                ) : (
+                                  dayRosterUnassignedEntries.map(entry => (
+                                    <div
+                                      key={`list-${entry.order.id}`}
+                                      draggable
+                                      onDragStart={(e) => handleDayRosterDragStart(e, entry.order.id)}
+                                      onDragEnd={handleDayRosterDragEnd}
+                                      onClick={() => setSelectedOrderForDetail(entry.order)}
+                                      role="button"
+                                      tabIndex={0}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') {
+                                          e.preventDefault();
+                                          setSelectedOrderForDetail(entry.order);
+                                        }
+                                      }}
+                                      className="w-full cursor-grab active:cursor-grabbing rounded-2xl border border-gray-200 bg-white px-4 py-3 text-left shadow-sm transition-all hover:border-gray-300 hover:shadow-md"
+                                    >
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="truncate text-sm font-bold text-gray-800">{entry.order.customer}</div>
+                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">{LINES[entry.order.line].name}</div>
+                                      </div>
+                                      <div className="mt-2 text-xs text-gray-500">
+                                        {fmt(entry.prodStart)} - {fmt(entry.endTime)} • {entry.order.num}
+                                      </div>
+                                      <div className="mt-1 text-xs text-gray-500">
+                                        {ev(entry.order).toFixed(1)} m3 • {normalizePkg(entry.order.pkg).toUpperCase()}
+                                      </div>
+                                      <div className="mt-2 text-[11px] font-medium text-blue-600">
+                                        Nog niet gekoppeld
+                                      </div>
+                                    </div>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="min-w-0 flex-1 overflow-auto">
+                              <div
+                                className="grid min-w-[880px]"
+                                style={{ gridTemplateColumns: `88px repeat(${dayRosterDriverColumns.length + (dayRosterUnassignedColumn ? 1 : 0)}, minmax(180px, 1fr))` }}
+                              >
+                                <div className="sticky top-0 z-20 bg-white border-b border-r border-gray-200 px-3 py-3 text-xs font-bold uppercase tracking-wider text-gray-400">
+                                  Tijd
+                                </div>
+                                {dayRosterDriverColumns.map(column => (
+                                  <div
+                                    key={column.key}
+                                    className={`sticky top-0 z-20 border-b border-r border-gray-200 bg-white px-3 py-3 transition-colors ${draggedDayRosterOrderId ? 'bg-blue-50/60 ring-1 ring-inset ring-blue-200' : ''}`}
+                                    onDragOver={(e) => e.preventDefault()}
+                                    onDrop={(e) => {
+                                      e.preventDefault();
+                                      const rawId = e.dataTransfer.getData('text/dayroster-order-id') || String(draggedDayRosterOrderId || '');
+                                      const orderId = Number(rawId);
+                                      const driverName = column.key.replace('driver:', '');
+                                      if (orderId && driverName) {
+                                        void handleAssignDriverToOrder(orderId, driverName);
+                                      }
+                                      setDraggedDayRosterOrderId(null);
+                                    }}
+                                  >
+                                    <div className="text-sm font-bold text-gray-800">{column.label}</div>
+                                    <div className="mt-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">
+                                      Chauffeur
+                                    </div>
+                                    {draggedDayRosterOrderId && (
+                                      <div className="mt-2 text-[11px] font-medium text-blue-600">
+                                        Sleep order hierheen
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                                {dayRosterUnassignedColumn && (
+                                  <div
+                                    key={dayRosterUnassignedColumn.key}
+                                    className={`sticky top-0 z-20 border-b border-r border-gray-200 bg-white px-3 py-3 transition-colors ${draggedDayRosterOrderId ? 'bg-orange-50/70 ring-1 ring-inset ring-orange-200' : ''}`}
+                                    onDragOver={(e) => e.preventDefault()}
+                                    onDrop={(e) => {
+                                      e.preventDefault();
+                                      const rawId = e.dataTransfer.getData('text/dayroster-order-id') || String(draggedDayRosterOrderId || '');
+                                      const orderId = Number(rawId);
+                                      if (orderId) {
+                                        void handleClearDriverFromOrder(orderId);
+                                      }
+                                      setDraggedDayRosterOrderId(null);
+                                    }}
+                                  >
+                                    <div className="text-sm font-bold text-gray-800">Ongekoppeld</div>
+                                    <div className="mt-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">
+                                      Nog geen chauffeur
+                                    </div>
+                                    {draggedDayRosterOrderId && (
+                                      <div className="mt-2 text-[11px] font-medium text-orange-600">
+                                        Sleep hierheen om los te koppelen
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                <div className="relative border-r border-gray-200 bg-gray-50/70">
+                                  {dayRosterTimeSlots.map((slot) => (
+                                    <div
+                                      key={slot}
+                                      className="border-b border-gray-100 px-3 py-2 text-xs font-semibold text-gray-500"
+                                      style={{ height: `${dayRosterRowHeight}px` }}
+                                    >
+                                      {minutesToTimeString(slot)}
+                                    </div>
+                                  ))}
+                                </div>
+
+                                {[...dayRosterDriverColumns, ...(dayRosterUnassignedColumn ? [dayRosterUnassignedColumn] : [])].map(column => {
+                                  const entries = dayRosterOrdersPerColumn.get(column.key) || [];
+                                  return (
+                                    <div
+                                      key={column.key}
+                                      className={`relative border-r border-gray-200 bg-white/90 ${draggedDayRosterOrderId ? 'bg-blue-50/20' : ''}`}
+                                      style={{ height: `${dayRosterSlotCount * dayRosterRowHeight}px` }}
+                                      onDragOver={(e) => e.preventDefault()}
+                                      onDrop={(e) => {
+                                        e.preventDefault();
+                                        const rawId = e.dataTransfer.getData('text/dayroster-order-id') || String(draggedDayRosterOrderId || '');
+                                        const orderId = Number(rawId);
+                                        if (!orderId) return;
+                                        if (column.isUnassigned) {
+                                          void handleClearDriverFromOrder(orderId);
+                                        } else {
+                                          const driverName = column.key.replace('driver:', '');
+                                          if (driverName) {
+                                            void handleAssignDriverToOrder(orderId, driverName);
+                                          }
+                                        }
+                                        setDraggedDayRosterOrderId(null);
+                                      }}
+                                    >
+                                      {dayRosterTimeSlots.map((slot) => (
+                                        <div
+                                          key={`${column.key}-${slot}`}
+                                          className="border-b border-gray-100"
+                                          style={{ height: `${dayRosterRowHeight}px` }}
+                                        />
+                                      ))}
+
+                                      {entries.map(entry => {
+                                        const top = Math.max(0, ((entry.startMinutes - dayRosterStartMinutes) / dayRosterSlotMinutes) * dayRosterRowHeight);
+                                        const durationMinutes = Math.max(dayRosterSlotMinutes, entry.endMinutes - entry.startMinutes);
+                                        const height = Math.max(44, (durationMinutes / dayRosterSlotMinutes) * dayRosterRowHeight - 6);
+                                        return (
+                                          <div
+                                            key={entry.order.id}
+                                            draggable
+                                            onDragStart={(e) => handleDayRosterDragStart(e, entry.order.id)}
+                                            onDragEnd={handleDayRosterDragEnd}
+                                            onClick={() => setSelectedOrderForDetail(entry.order)}
+                                            role="button"
+                                            tabIndex={0}
+                                            onKeyDown={(e) => {
+                                              if (e.key === 'Enter' || e.key === ' ') {
+                                                e.preventDefault();
+                                                setSelectedOrderForDetail(entry.order);
+                                              }
+                                            }}
+                                            className="absolute left-2 right-2 cursor-grab active:cursor-grabbing rounded-xl border px-3 py-2 text-left shadow-sm transition-all hover:shadow-md"
+                                            style={{
+                                              top: `${top + 3}px`,
+                                              height: `${height}px`,
+                                              backgroundColor: `${LINES[entry.order.line].color}18`,
+                                              borderColor: `${LINES[entry.order.line].color}55`
+                                            }}
+                                          >
+                                            <div className="flex items-center justify-between gap-2">
+                                              <div className="truncate text-[11px] font-bold uppercase tracking-wide text-gray-500">
+                                                {LINES[entry.order.line].name}
+                                              </div>
+                                              <div className="text-[11px] font-semibold text-gray-500">
+                                                {fmt(entry.prodStart)} - {fmt(entry.endTime)}
+                                              </div>
+                                            </div>
+                                            <div className="mt-1 truncate text-sm font-bold text-gray-800">
+                                              {entry.order.customer}
+                                            </div>
+                                            <div className="mt-1 truncate text-xs text-gray-600">
+                                              {entry.order.num} • {ev(entry.order).toFixed(1)} m3
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {plannerTab === 'schema' && (
                       <>
                         {plannerLineFilter !== 0 && storingen[plannerLineFilter as LineId]?.actief && (
