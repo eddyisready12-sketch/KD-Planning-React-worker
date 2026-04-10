@@ -10,7 +10,7 @@ import {
   fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides
 } from './utils';
 import { fetchOrdersFromSheet, fetchBunkersFromSheet, importOrdersFromCsvFile, CalibrationMaterial } from './services/sheetService';
-import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriverListFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow } from './services/supabaseService';
+import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriverListFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, upsertDriverInSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow } from './services/supabaseService';
 import { supabase } from './services/supabaseClient';
 import { 
   LayoutDashboard, ClipboardList, Database, Settings, Bell, 
@@ -62,7 +62,29 @@ type GapDebugEntry = {
   candidates: GapDebugCandidate[];
 };
 
+type DriverFormState = {
+  name: string;
+  company: string;
+  truckPlate: string;
+  trailerPlate: string;
+  vehicleHeightM: string;
+  steeringAxles: string;
+  maxWeightKg: string;
+  notes: string;
+};
+
 const FIXED_FIRST_ORDER_START = '05:15';
+const EMPTY_DRIVER_FORM: DriverFormState = {
+  name: '',
+  company: '',
+  truckPlate: '',
+  trailerPlate: '',
+  vehicleHeightM: '',
+  steeringAxles: '',
+  maxWeightKg: '',
+  notes: ''
+};
+
 const DEFAULT_PLANNER_TRIGGERS: PlannerTrigger[] = [
   { key: 'priority_1_bale', label: 'Prioriteit verpakking BAL', description: '`BAL` krijgt standaard prio 1.', active: true, fieldName: 'pkg', matchValue: 'bale', actionName: 'priority_1', targetLine: 'all' },
   { key: 'priority_1_bag', label: 'Prioriteit verpakking BAG', description: '`BAG` krijgt standaard prio 1.', active: true, fieldName: 'pkg', matchValue: 'bag', actionName: 'priority_1', targetLine: 'all' },
@@ -263,6 +285,8 @@ export default function App() {
   const [sharedDriverNames, setSharedDriverNames] = useState<string[]>([]);
   const [plannerTriggers, setPlannerTriggers] = useState<PlannerTrigger[]>([]);
   const [newDriverName, setNewDriverName] = useState('');
+  const [showDriverForm, setShowDriverForm] = useState(false);
+  const [newDriverForm, setNewDriverForm] = useState<DriverFormState>(EMPTY_DRIVER_FORM);
   const [driverSyncDebug, setDriverSyncDebug] = useState('');
   const [isSavingDriver, setIsSavingDriver] = useState(false);
   const [draggedOperatorOrderId, setDraggedOperatorOrderId] = useState<number | null>(null);
@@ -1334,11 +1358,20 @@ export default function App() {
   }
 
   async function handleAddDriver() {
-    const trimmed = newDriverName.trim();
+    const trimmed = newDriverForm.name.trim();
     if (!trimmed) return;
+
+    const toOptionalNumber = (value: string): number | null => {
+      const normalized = value.trim().replace(',', '.');
+      if (!normalized) return null;
+      const parsed = Number(normalized);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
     if (sharedDriverNames.some(name => name.toLowerCase() === trimmed.toLowerCase())) {
       setSelectedDriverName(sharedDriverNames.find(name => name.toLowerCase() === trimmed.toLowerCase()) || trimmed);
       setNewDriverName('');
+      setNewDriverForm(prev => ({ ...prev, name: '' }));
       setDriverSyncDebug(`${trimmed} bestaat al in de centrale chauffeurslijst`);
       return;
     }
@@ -1349,6 +1382,8 @@ export default function App() {
     setSharedDriverNames(nextNames);
     setSelectedDriverName(trimmed);
     setNewDriverName('');
+    setNewDriverForm(EMPTY_DRIVER_FORM);
+    setShowDriverForm(false);
     setIsSavingDriver(true);
     setDriverSyncDebug(`Opslaan: ${trimmed}...`);
 
@@ -1359,7 +1394,16 @@ export default function App() {
     }
 
     try {
-      await writeDriverListToSupabase(nextNames);
+      await upsertDriverInSupabase({
+        name: trimmed,
+        company: newDriverForm.company,
+        truckPlate: newDriverForm.truckPlate,
+        trailerPlate: newDriverForm.trailerPlate,
+        vehicleHeightM: toOptionalNumber(newDriverForm.vehicleHeightM),
+        steeringAxles: toOptionalNumber(newDriverForm.steeringAxles),
+        maxWeightKg: toOptionalNumber(newDriverForm.maxWeightKg),
+        notes: newDriverForm.notes
+      });
       const namesAfter = await fetchDriverListFromSupabase();
       setSharedDriverNames(namesAfter);
       if (!namesAfter.some(name => name.toLowerCase() === trimmed.toLowerCase())) {
@@ -5707,28 +5751,101 @@ export default function App() {
                             {driverSyncDebug && (
                               <div className="mt-2 text-xs font-medium text-blue-600">{driverSyncDebug}</div>
                             )}
-                            <div className="mt-3 flex gap-2">
-                              <input
-                                className="min-w-0 flex-1 rounded-xl border border-gray-200 px-3 py-2 text-sm outline-none focus:border-green-500"
-                                placeholder="Nieuwe chauffeur"
-                                value={newDriverName}
-                                onChange={(e) => setNewDriverName(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') {
-                                    e.preventDefault();
-                                    handleAddDriver();
-                                  }
-                                }}
-                              />
+                            <div className="mt-3">
                               <button
                                 type="button"
-                                className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
-                                onClick={handleAddDriver}
+                                className="w-full rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+                                onClick={() => setShowDriverForm(prev => !prev)}
                                 disabled={isSavingDriver}
                               >
-                                {isSavingDriver ? 'Opslaan...' : '+ Chauffeur'}
+                                {showDriverForm ? 'Formulier sluiten' : '+ Chauffeur'}
                               </button>
                             </div>
+                            {showDriverForm && (
+                              <div className="mt-3 rounded-2xl border border-blue-100 bg-blue-50/40 p-3">
+                                <div className="grid grid-cols-1 gap-2">
+                                  <input
+                                    className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-green-500"
+                                    placeholder="Naam chauffeur *"
+                                    value={newDriverForm.name}
+                                    onChange={(e) => setNewDriverForm(prev => ({ ...prev, name: e.target.value }))}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        handleAddDriver();
+                                      }
+                                    }}
+                                  />
+                                  <input
+                                    className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-green-500"
+                                    placeholder="Bedrijf"
+                                    value={newDriverForm.company}
+                                    onChange={(e) => setNewDriverForm(prev => ({ ...prev, company: e.target.value }))}
+                                  />
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <input
+                                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-green-500"
+                                      placeholder="Kenteken truck"
+                                      value={newDriverForm.truckPlate}
+                                      onChange={(e) => setNewDriverForm(prev => ({ ...prev, truckPlate: e.target.value }))}
+                                    />
+                                    <input
+                                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-green-500"
+                                      placeholder="Kenteken trailer"
+                                      value={newDriverForm.trailerPlate}
+                                      onChange={(e) => setNewDriverForm(prev => ({ ...prev, trailerPlate: e.target.value }))}
+                                    />
+                                  </div>
+                                  <div className="grid grid-cols-3 gap-2">
+                                    <input
+                                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-green-500"
+                                      placeholder="Hoogte"
+                                      value={newDriverForm.vehicleHeightM}
+                                      onChange={(e) => setNewDriverForm(prev => ({ ...prev, vehicleHeightM: e.target.value }))}
+                                    />
+                                    <input
+                                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-green-500"
+                                      placeholder="Stuurassen"
+                                      value={newDriverForm.steeringAxles}
+                                      onChange={(e) => setNewDriverForm(prev => ({ ...prev, steeringAxles: e.target.value }))}
+                                    />
+                                    <input
+                                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-green-500"
+                                      placeholder="Max kg"
+                                      value={newDriverForm.maxWeightKg}
+                                      onChange={(e) => setNewDriverForm(prev => ({ ...prev, maxWeightKg: e.target.value }))}
+                                    />
+                                  </div>
+                                  <textarea
+                                    className="min-h-[72px] w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-green-500"
+                                    placeholder="Notities"
+                                    value={newDriverForm.notes}
+                                    onChange={(e) => setNewDriverForm(prev => ({ ...prev, notes: e.target.value }))}
+                                  />
+                                  <div className="flex gap-2">
+                                    <button
+                                      type="button"
+                                      className="flex-1 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-600 transition-colors hover:bg-gray-50"
+                                      onClick={() => {
+                                        setNewDriverForm(EMPTY_DRIVER_FORM);
+                                        setShowDriverForm(false);
+                                      }}
+                                      disabled={isSavingDriver}
+                                    >
+                                      Annuleren
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="flex-1 rounded-xl bg-green-700 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-green-800 disabled:cursor-not-allowed disabled:bg-green-300"
+                                      onClick={handleAddDriver}
+                                      disabled={isSavingDriver || !newDriverForm.name.trim()}
+                                    >
+                                      {isSavingDriver ? 'Opslaan...' : 'Opslaan'}
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
                             <div className="mt-3">
                               <input
                                 className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm outline-none focus:border-green-500"

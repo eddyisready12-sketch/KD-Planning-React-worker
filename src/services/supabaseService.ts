@@ -85,6 +85,33 @@ type SharedAppStateRow = {
   updated_at?: string | null;
 };
 
+export type SharedDriverInput = {
+  name: string;
+  company?: string;
+  truckPlate?: string;
+  trailerPlate?: string;
+  vehicleHeightM?: number | null;
+  steeringAxles?: number | null;
+  maxWeightKg?: number | null;
+  notes?: string;
+};
+
+type SharedDriverRow = {
+  id?: string | null;
+  workspace?: string | null;
+  name?: string | null;
+  active?: boolean | null;
+  company?: string | null;
+  truck_plate?: string | null;
+  trailer_plate?: string | null;
+  vehicle_height_m?: number | string | null;
+  steering_axles?: number | string | null;
+  max_weight_kg?: number | string | null;
+  notes?: string | null;
+  updated_by?: string | null;
+  updated_at?: string | null;
+};
+
 type SharedTriggerRow = {
   id?: string | null;
   workspace?: string | null;
@@ -666,34 +693,20 @@ export async function fetchDriverListFromSupabase(): Promise<string[]> {
   if (!isSupabaseConfigured()) return [];
 
   const { data: rows, error } = await supabase
-    .from('shared_app_state')
-    .select('*')
+    .from('shared_drivers')
+    .select('name,active')
     .eq('workspace', SUPABASE_WORKSPACE)
-    .eq('state_key', 'drivers');
+    .order('name', { ascending: true });
 
   if (error) {
     throw new Error(`Supabase fout: ${error.message}`);
   }
 
-  const names = (rows || []).flatMap(row => {
-    const raw = row.state_value;
-    if (raw && typeof raw === 'object' && Array.isArray(raw.names)) {
-      return raw.names;
-    }
-    if (typeof raw === 'string') {
-      try {
-        const parsed = JSON.parse(raw);
-        return Array.isArray(parsed?.names) ? parsed.names : [];
-      } catch {
-        return [];
-      }
-    }
-    return [];
-  });
   return Array.from(
     new Set(
-      names
-        .map(name => String(name || '').trim())
+      (rows || [])
+        .filter(row => (row as SharedDriverRow).active !== false)
+        .map(row => String((row as SharedDriverRow).name || '').trim())
         .filter(Boolean)
     )
   ).sort((a, b) => a.localeCompare(b, 'nl-NL'));
@@ -749,40 +762,58 @@ export async function writeDriverListToSupabase(driverNames: string[]): Promise<
     )
   ).sort((a, b) => a.localeCompare(b, 'nl-NL'));
 
+  await Promise.all(names.map(name => upsertDriverInSupabase({ name })));
+}
+
+export async function upsertDriverInSupabase(driver: SharedDriverInput): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+
+  const name = driver.name.trim();
+  if (!name) return;
+
+  const payload = {
+    workspace: SUPABASE_WORKSPACE,
+    name,
+    active: true,
+    company: driver.company?.trim() || null,
+    truck_plate: driver.truckPlate?.trim() || null,
+    trailer_plate: driver.trailerPlate?.trim() || null,
+    vehicle_height_m: driver.vehicleHeightM ?? null,
+    steering_axles: driver.steeringAxles ?? null,
+    max_weight_kg: driver.maxWeightKg ?? null,
+    notes: driver.notes?.trim() || null,
+    updated_at: new Date().toISOString()
+  };
+
   const { data: existingRows, error: existingError } = await supabase
-    .from('shared_app_state')
+    .from('shared_drivers')
     .select('id')
     .eq('workspace', SUPABASE_WORKSPACE)
-    .eq('state_key', 'drivers')
+    .ilike('name', name)
     .limit(1);
 
   if (existingError) {
     throw new Error(`Supabase fout: ${existingError.message}`);
   }
 
-  const payload = {
-    workspace: SUPABASE_WORKSPACE,
-    state_key: 'drivers',
-    state_type: 'drivers',
-    state_value: { names },
-    updated_at: new Date().toISOString()
-  };
-
-  if (existingRows[0]?.id) {
+  const existingId = (existingRows?.[0] as SharedDriverRow | undefined)?.id;
+  if (existingId) {
     const { error } = await supabase
-      .from('shared_app_state')
+      .from('shared_drivers')
       .update(payload)
-      .eq('id', String(existingRows[0].id));
+      .eq('id', existingId);
     if (error) {
       throw new Error(`Supabase update fout: ${error.message}`);
     }
-  } else {
-    const { error } = await supabase
-      .from('shared_app_state')
-      .insert(payload);
-    if (error) {
-      throw new Error(`Supabase insert fout: ${error.message}`);
-    }
+    return;
+  }
+
+  const { error } = await supabase
+    .from('shared_drivers')
+    .insert(payload);
+
+  if (error) {
+    throw new Error(`Supabase insert fout: ${error.message}`);
   }
 }
 
