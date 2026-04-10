@@ -5008,13 +5008,9 @@ export default function App() {
                                     >
                                       <div className="flex items-center justify-between gap-2">
                                         <div className="truncate text-sm font-bold text-gray-800">{entry.order.customer}</div>
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">{LINES[entry.order.line].name}</div>
                                       </div>
                                       <div className="mt-2 text-xs text-gray-500">
-                                        {fmt(entry.prodStart)} - {fmt(entry.endTime)} • {entry.order.num}
-                                      </div>
-                                      <div className="mt-1 text-xs text-gray-500">
-                                        {ev(entry.order).toFixed(1)} m3 • {normalizePkg(entry.order.pkg).toUpperCase()}
+                                        Order {entry.order.num} • {ev(entry.order).toFixed(1)} m3 • {normalizePkg(entry.order.pkg).toUpperCase()}
                                       </div>
                                       <div className="mt-2 text-[11px] font-medium text-blue-600">
                                         Nog niet gekoppeld
@@ -5127,19 +5123,11 @@ export default function App() {
                                               borderColor: `${LINES[entry.order.line].color}55`
                                             }}
                                           >
-                                            <div className="flex items-center justify-between gap-2">
-                                              <div className="truncate text-[11px] font-bold uppercase tracking-wide text-gray-500">
-                                                {LINES[entry.order.line].name}
-                                              </div>
-                                              <div className="text-[11px] font-semibold text-gray-500">
-                                                {fmt(entry.prodStart)} - {fmt(entry.endTime)}
-                                              </div>
-                                            </div>
-                                            <div className="mt-1 truncate text-sm font-bold text-gray-800">
+                                            <div className="truncate text-sm font-bold text-gray-800">
                                               {entry.order.customer}
                                             </div>
                                             <div className="mt-1 truncate text-xs text-gray-600">
-                                              {entry.order.num} • {ev(entry.order).toFixed(1)} m3
+                                              Order {entry.order.num} • {ev(entry.order).toFixed(1)} m3 • {normalizePkg(entry.order.pkg).toUpperCase()}
                                             </div>
                                           </div>
                                         );
