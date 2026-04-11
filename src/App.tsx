@@ -5176,6 +5176,15 @@ export default function App() {
 
                                 {dayRosterDriverColumns.map(column => {
                                   const entries = dayRosterOrdersPerColumn.get(column.key) || [];
+                                  let previousCardBottom = 0;
+                                  const positionedEntries = entries.map(entry => {
+                                    const rawTop = Math.max(0, ((entry.startMinutes - dayRosterStartMinutes) / dayRosterSlotMinutes) * dayRosterRowHeight);
+                                    const durationMinutes = Math.max(dayRosterSlotMinutes, entry.endMinutes - entry.startMinutes);
+                                    const height = Math.max(54, (durationMinutes / dayRosterSlotMinutes) * dayRosterRowHeight - 6);
+                                    const top = Math.max(rawTop, previousCardBottom + 6);
+                                    previousCardBottom = top + height;
+                                    return { entry, top, height };
+                                  });
                                   return (
                                     <div
                                       key={column.key}
@@ -5202,10 +5211,7 @@ export default function App() {
                                         />
                                       ))}
 
-                                      {entries.map(entry => {
-                                        const top = Math.max(0, ((entry.startMinutes - dayRosterStartMinutes) / dayRosterSlotMinutes) * dayRosterRowHeight);
-                                        const durationMinutes = Math.max(dayRosterSlotMinutes, entry.endMinutes - entry.startMinutes);
-                                        const height = Math.max(44, (durationMinutes / dayRosterSlotMinutes) * dayRosterRowHeight - 6);
+                                      {positionedEntries.map(({ entry, top, height }) => {
                                         return (
                                           <div
                                             key={entry.order.id}
@@ -5229,10 +5235,15 @@ export default function App() {
                                               borderColor: `${LINES[entry.order.line].color}55`
                                             }}
                                           >
-                                            <div className="truncate text-sm font-bold text-gray-800">
-                                              {entry.order.customer}
+                                            <div className="flex items-start justify-between gap-2">
+                                              <div className="min-w-0 truncate text-sm font-bold text-gray-800">
+                                                {entry.order.customer}
+                                              </div>
+                                              <div className="shrink-0 text-[11px] font-bold tabular-nums text-gray-500">
+                                                {minutesToTimeString(entry.startMinutes)}
+                                              </div>
                                             </div>
-                                            <div className="mt-1 truncate text-xs text-gray-600">
+                                            <div className="mt-0.5 truncate text-[11px] text-gray-600">
                                               Order {entry.order.num} • {ev(entry.order).toFixed(1)} m3 • {normalizePkg(entry.order.pkg).toUpperCase()}
                                             </div>
                                           </div>
