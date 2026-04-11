@@ -3670,8 +3670,12 @@ export default function App() {
             );
           })
           .map(entry => {
-            const startMinutes = entry.prodStart.getHours() * 60 + entry.prodStart.getMinutes();
-            const endMinutes = entry.endTime.getHours() * 60 + entry.endTime.getMinutes();
+            const productionStartMinutes = entry.prodStart.getHours() * 60 + entry.prodStart.getMinutes();
+            const productionEndMinutes = entry.endTime.getHours() * 60 + entry.endTime.getMinutes();
+            const productionDurationMinutes = Math.max(dayRosterSlotMinutes, productionEndMinutes - productionStartMinutes);
+            const loadReferenceMinutes = etaToMins(getOrderLoadReferenceTime(entry.order));
+            const startMinutes = loadReferenceMinutes ?? productionStartMinutes;
+            const endMinutes = startMinutes + productionDurationMinutes;
             const driverName = String(entry.order.driver || '').trim();
             const columnKey = driverName ? `driver:${driverName}` : 'unassigned';
             const columnLabel = driverName ? driverName : 'Ongekoppeld';
