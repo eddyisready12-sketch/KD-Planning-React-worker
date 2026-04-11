@@ -3673,7 +3673,8 @@ export default function App() {
             const productionStartMinutes = entry.prodStart.getHours() * 60 + entry.prodStart.getMinutes();
             const productionEndMinutes = entry.endTime.getHours() * 60 + entry.endTime.getMinutes();
             const productionDurationMinutes = Math.max(dayRosterSlotMinutes, productionEndMinutes - productionStartMinutes);
-            const loadReferenceMinutes = etaToMins(getOrderLoadReferenceTime(entry.order));
+            const loadReferenceTime = getOrderLoadReferenceTime(entry.order);
+            const loadReferenceMinutes = loadReferenceTime ? timeStringToMinutes(loadReferenceTime, productionStartMinutes) : null;
             const startMinutes = loadReferenceMinutes ?? productionStartMinutes;
             const endMinutes = startMinutes + productionDurationMinutes;
             const driverName = String(entry.order.driver || '').trim();
