@@ -173,14 +173,33 @@ function formatOperatorDateTimeRange(start: Date, end: Date, currentTime: Date):
   return `${formatPlannerDateChip(start)} ${fmt(start)} - ${formatPlannerDateChip(end)} ${fmt(end)}`;
 }
 
-function getWeekDates(anchor: Date): Date[] {
+function getPlanningDateRange(anchor: Date, visibleDates: Date[] = []): Date[] {
   const base = new Date(anchor);
   base.setHours(0, 0, 0, 0);
   const day = base.getDay();
   const diffToMonday = day === 0 ? -6 : 1 - day;
   const monday = new Date(base);
   monday.setDate(base.getDate() + diffToMonday);
-  return Array.from({ length: 7 }, (_, index) => {
+
+  const defaultEnd = new Date(monday);
+  defaultEnd.setDate(monday.getDate() + 13);
+
+  const latestVisibleDate = visibleDates.reduce<Date | null>((latest, date) => {
+    const normalized = new Date(date);
+    normalized.setHours(0, 0, 0, 0);
+    return !latest || normalized > latest ? normalized : latest;
+  }, null);
+
+  const endDate = new Date(defaultEnd);
+  if (latestVisibleDate && latestVisibleDate > endDate) {
+    const latestDay = latestVisibleDate.getDay();
+    const diffToSunday = latestDay === 0 ? 0 : 7 - latestDay;
+    endDate.setTime(latestVisibleDate.getTime());
+    endDate.setDate(latestVisibleDate.getDate() + diffToSunday);
+  }
+
+  const dayCount = Math.max(1, Math.round((endDate.getTime() - monday.getTime()) / 86400000) + 1);
+  return Array.from({ length: dayCount }, (_, index) => {
     const date = new Date(monday);
     date.setDate(monday.getDate() + index);
     date.setHours(0, 0, 0, 0);
@@ -3570,7 +3589,7 @@ export default function App() {
 
   const plannerWeekDates = useMemo(() => {
     const anchor = plannerVisibleDates[0] || currentTime;
-    return getWeekDates(anchor);
+    return getPlanningDateRange(anchor, plannerVisibleDates);
   }, [plannerVisibleDates, currentTime]);
 
   useEffect(() => {
