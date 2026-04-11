@@ -3335,9 +3335,9 @@ export default function App() {
     return `${normalizedUnit}|${normalizedName}`;
   };
 
-  const isBulkLikeOrderComponent = (component: Order['components'][number]) => {
+  const isBulkLikeOrderComponent = (component: Order['components'][number], bunkerScope: Bunker[] = lineBunkers) => {
     const unit = (component.unit || '').trim().toUpperCase();
-    const isInBunkerUniverse = lineBunkers.some(b =>
+    const isInBunkerUniverse = bunkerScope.some(b =>
       (b.m && canUseExistingMaterialForRequested(b.m, b.mc, component.name, component.code)) ||
       canBunkerServeOrderComponent(b, component)
     );
@@ -3349,14 +3349,14 @@ export default function App() {
     return !material || material === 'leeg' || material === 'empty';
   };
 
-  const getOrderBunkerAssignments = (order: Order) => {
+  const getOrderBunkerAssignments = (order: Order, bunkerScope: Bunker[] = bunkers[order.line] || lineBunkers) => {
     const assignments = new Map<string, Bunker | null>();
     const usedBunkers = new Set<string>();
-    const bulkComponents = order.components.filter(component => isBulkLikeOrderComponent(component));
+    const bulkComponents = order.components.filter(component => isBulkLikeOrderComponent(component, bunkerScope));
 
     bulkComponents.forEach(component => {
       const key = `${component.name}|${component.code}`;
-      const currentMatch = lineBunkers.find(b =>
+      const currentMatch = bunkerScope.find(b =>
         !usedBunkers.has(b.c) &&
         isBunkerExactMatchForComponent(b, component)
       );
@@ -3383,7 +3383,7 @@ export default function App() {
         assignments.set(key, reusableAssignedBunker);
         return;
       }
-      const possibleMatch = lineBunkers
+      const possibleMatch = bunkerScope
         .filter(b => !usedBunkers.has(b.c) && canBunkerServeOrderComponent(b, component))
         .sort((a, b) => {
           const emptyDiff = Number(isBunkerEffectivelyEmpty(b)) - Number(isBunkerEffectivelyEmpty(a));
@@ -3409,13 +3409,13 @@ export default function App() {
     return !!bunker.fx && canBunkerServeOrderComponent(bunker, component);
   };
 
-  const isOrderDirectlyRunnable = (order: Order) => {
-    const { bulkComponents, assignments } = getOrderBunkerAssignments(order);
+  const isOrderDirectlyRunnable = (order: Order, bunkerScope: Bunker[] = bunkers[order.line] || lineBunkers) => {
+    const { bulkComponents, assignments } = getOrderBunkerAssignments(order, bunkerScope);
     return bulkComponents.every(component => isBunkerReadyForComponent(assignments.get(`${component.name}|${component.code}`), component));
   };
 
-  const getOrderBunkerPrepReason = (order: Order) => {
-    const { bulkComponents, assignments } = getOrderBunkerAssignments(order);
+  const getOrderBunkerPrepReason = (order: Order, bunkerScope: Bunker[] = bunkers[order.line] || lineBunkers) => {
+    const { bulkComponents, assignments } = getOrderBunkerAssignments(order, bunkerScope);
     const firstMismatch = bulkComponents.find(component => {
       const bunker = assignments.get(`${component.name}|${component.code}`);
       return !isBunkerReadyForComponent(bunker, component);
@@ -3439,9 +3439,10 @@ export default function App() {
     const pkg = normalizePkg(order.pkg);
     const missingBulkLoadTime = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && !normalizedEta;
     const waitsForBulk = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes - 30;
-    const needsRecipeBunkerPrep = !isOrderDirectlyRunnable(order);
+    const orderLineBunkers = bunkers[order.line] || lineBunkers;
+    const needsRecipeBunkerPrep = !isOrderDirectlyRunnable(order, orderLineBunkers);
     const needsCleaning = index === 0 && hasProlineCleaningTrigger(order);
-    const bunkerPrepReason = getOrderBunkerPrepReason(order);
+    const bunkerPrepReason = getOrderBunkerPrepReason(order, orderLineBunkers);
     const needsPrep = needsRecipeBunkerPrep;
 
     if (lineIssue?.actief) {
@@ -3487,8 +3488,9 @@ export default function App() {
     const pkg = normalizePkg(order.pkg);
     const missingBulkLoadTime = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && !normalizedEta;
     const waitsForBulk = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes - 30;
-    const needsRecipeBunkerPrep = !isOrderDirectlyRunnable(order);
-    const bunkerPrepReason = getOrderBunkerPrepReason(order);
+    const orderLineBunkers = bunkers[order.line] || lineBunkers;
+    const needsRecipeBunkerPrep = !isOrderDirectlyRunnable(order, orderLineBunkers);
+    const bunkerPrepReason = getOrderBunkerPrepReason(order, orderLineBunkers);
     const needsCleaning = index === 0 && hasProlineCleaningTrigger(order);
 
     if (lineIssue?.actief) {
@@ -3819,12 +3821,12 @@ export default function App() {
     const upcomingOrders = operatorDisplayEntries.slice(0, 2).map(entry => entry.order);
     const nextOrder = upcomingOrders[0];
     if (!nextOrder) return [];
-    const { assignments } = getOrderBunkerAssignments(nextOrder);
+    const { assignments } = getOrderBunkerAssignments(nextOrder, lineBunkers);
 
     const switches: Array<{ name: string; code: string; bunker: string; supportCount: number; urgency: 'nu' | 'straks' }> = [];
 
     nextOrder.components.forEach(component => {
-      if (!isBulkLikeOrderComponent(component)) return;
+      if (!isBulkLikeOrderComponent(component, lineBunkers)) return;
 
       const alreadyLoaded = lineBunkers.some(b => isBunkerReadyForComponent(b, component));
       if (alreadyLoaded) return;
@@ -3837,7 +3839,7 @@ export default function App() {
         let supportCount = 0;
         upcomingOrders.forEach(order => {
           order.components.forEach(orderComponent => {
-            if (!isBulkLikeOrderComponent(orderComponent)) return;
+            if (!isBulkLikeOrderComponent(orderComponent, lineBunkers)) return;
             const canServe = lineBunkers.find(b => b.c === assignedBunker);
             if (canServe && canBunkerServeOrderComponent(canServe, orderComponent)) supportCount += 1;
           });
@@ -3858,7 +3860,7 @@ export default function App() {
           let nextOrderSupport = 0;
           upcomingOrders.forEach(order => {
             order.components.forEach(orderComponent => {
-              if (!isBulkLikeOrderComponent(orderComponent)) return;
+              if (!isBulkLikeOrderComponent(orderComponent, lineBunkers)) return;
               if (canBunkerServeOrderComponent(bunker, orderComponent)) {
                 supportCount += 1;
                 if (order.id === nextOrder.id) nextOrderSupport += 1;

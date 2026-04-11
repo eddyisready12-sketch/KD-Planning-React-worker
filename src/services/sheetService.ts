@@ -22,12 +22,12 @@ interface GvizResponse {
 }
 
 const HEADER_MAP: Record<string, string[]> = {
-  recipe: ['Item / recept', 'Item/recept', 'itemrecept', 'item_recept', 'ProductCode', 'recipe', 'recept', 'artikel', 'artikelnummer', 'productcode', 'rawcode', 'art_nr', 'artnr', 'mix'],
+  recipe: ['Item / recept', 'Item/recept', 'Artikel Code', 'itemrecept', 'item_recept', 'ProductCode', 'recipe', 'recept', 'artikel', 'artikelnummer', 'productcode', 'rawcode', 'art_code', 'art_nr', 'artnr', 'mix'],
   orderNum: ['OrderNummer', 'order', 'ordernr', 'ordernummer', 'order_num', 'num', 'bestelnummer', 'opdracht', 'opdrachtnummer'],
   productionOrder: ['ProductieOrder', 'productieorder', 'productie_order', 'productionorder', 'prodorder', 'prod_order', 'po_nummer', 'P.O.', 'PO', 'p.o.'],
   rit: ['Ritnummer', 'Rit Nummer', 'rit', 'trip', 'route', 'ritnummer', 'rit_nr', 'ritnr'],
   customer: ['Klantnaam', 'Klant', 'customer', 'klant', 'debiteur', 'naam', 'klantnaam', 'ontvanger'],
-  line: ['Menglijn', 'Meng-lijn', 'line', 'lijn', 'mixline', 'menglijn', 'lijn_nr', 'lijnnr'],
+  line: ['Menglijn', 'Meng-lijn', 'ML', 'line', 'lijn', 'mixline', 'menglijn', 'lijn_nr', 'lijnnr'],
   date: ['Datum', 'Leverdatum', 'datum', 'date', 'plandatum', 'planningsdatum', 'lever_datum'],
   plannedQty: ['Geplande hoeveelheid', 'Gewenst', 'geplandehoeveelheid', 'plannedquantity', 'planned_qty', 'hoeveelheid', 'Gepland van geproduceerd', 'geplandvangeproduceerd'],
   plannedCount: ['Gepland aantal', 'geplandaantal', 'plannedcount', 'planned_count', 'aantal'],
@@ -41,7 +41,7 @@ const HEADER_MAP: Record<string, string[]> = {
   componentCode: ['RAW_Code', 'raw_code', 'rawcode', 'grondstofnummer', 'grondstof_nummer', 'componentcode', 'art_code', 'code'],
   ratio: ['Verhouding', 'verhouding', 'ratio', 'percentage', 'aandeel', 'perc', 'waarde'],
   unit: ['Comp_Eenheid', 'comp_eenheid', 'compeenheid', 'component_eenheid', 'eenheid_component', 'unit', 'eenheid'],
-  pkg: ['Eenheid', 'pkg', 'packaging', 'packagingtype', 'packaging_type', 'package', 'package_type', 'verpakking', 'verpakkingstype', 'verpakking_type', 'verpakkingsvorm', 'type', 'afvulvorm', 'emballage', 'eenheid', 'vorm'],
+  pkg: ['Eenheid', 'V', 'pkg', 'packaging', 'packagingtype', 'packaging_type', 'package', 'package_type', 'verpakking', 'verpakkingstype', 'verpakking_type', 'verpakkingsvorm', 'type', 'afvulvorm', 'emballage', 'eenheid', 'vorm'],
   driver: ['Chauffeur', 'Transporteur', 'chauffeur', 'driver', 'truckdriver', 'vervoerder'],
   yZeile: ['Y-Zeile', 'y_zeile', 'yzeile', 'y zeile'],
   productName: ['Product', 'product', 'Productnaam', 'productnaam', 'product_name', 'mixnaam', 'omschrijving']
@@ -105,6 +105,8 @@ function normalizeSheetDate(value: string): string {
 function inferPkgFromImportedFields(unitRaw: string, productRaw: string): Order['pkg'] {
   const unit = String(unitRaw || '').trim().toLowerCase();
   const product = String(productRaw || '').trim().toLowerCase();
+  if (unit === 'l' || unit === 'los') return 'bulk';
+  if (unit === 'v' || unit === 'verpakt') return 'packaged';
   if (unit === 'm3' || unit === 'bulk') return 'bulk';
   if (unit === 'bal') return 'bale';
   if (unit === 'bba' || unit === 'bag') return 'bag';
@@ -195,7 +197,7 @@ function buildOrderFromValues(
   const pkg = inferPkgFromImportedFields(getValue('pkg'), getValue('productName'));
   const rawStatus = getValue('status');
   const normalizedStatus = normalizeImportedStatus(rawStatus);
-  const prio = (pkg === 'bale' || pkg === 'bag') ? 1 : (parseInt(getValue('prio'), 10) || 2);
+  const prio = pkg !== 'bulk' ? 1 : (parseInt(getValue('prio'), 10) || 2);
 
   const normalizedDate = normalizeSheetDate(getValue('date')) || String(fallbackDate || '').trim();
 
