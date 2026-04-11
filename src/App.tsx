@@ -4960,7 +4960,7 @@ export default function App() {
                             Geen plannerblokken voor deze dag of filter.
                           </div>
                         ) : (
-                          <div className="flex min-h-[720px]">
+                          <div className="flex min-h-[720px] max-h-[78vh] overflow-hidden">
                             <div
                               className={`w-[320px] shrink-0 border-r border-gray-200 bg-gray-50/60 transition-colors ${draggedDayRosterOrderId ? 'bg-orange-50/80 ring-1 ring-inset ring-orange-200' : ''}`}
                               onDragOver={(e) => {
@@ -4983,7 +4983,7 @@ export default function App() {
                                   Sleep een order naar een chauffeurkolom. Sleep hem terug hierheen om hem weer los te koppelen.
                                 </div>
                               </div>
-                              <div className="max-h-[720px] overflow-auto px-3 py-3 space-y-3">
+                              <div className="h-[calc(78vh-72px)] overflow-auto px-3 py-3 space-y-3">
                                 {dayRosterUnassignedEntries.length === 0 ? (
                                   <div className="rounded-xl border border-dashed border-gray-200 bg-white px-4 py-5 text-sm italic text-gray-400">
                                     {draggedDayRosterOrderId ? 'Laat hier los om terug te zetten.' : 'Geen ongekoppelde orders voor deze dag.'}
@@ -5021,10 +5021,10 @@ export default function App() {
                               </div>
                             </div>
 
-                            <div className="min-w-0 flex-1 overflow-auto">
+                            <div className="min-w-0 flex-1 overflow-auto overscroll-contain">
                               <div
-                                className="grid min-w-[880px]"
-                                style={{ gridTemplateColumns: `88px repeat(${dayRosterDriverColumns.length}, minmax(180px, 1fr))` }}
+                                className="grid w-max min-w-full"
+                                style={{ gridTemplateColumns: `88px repeat(${Math.max(dayRosterDriverColumns.length, 1)}, 240px)` }}
                               >
                                 <div className="sticky top-0 z-20 bg-white border-b border-r border-gray-200 px-3 py-3 text-xs font-bold uppercase tracking-wider text-gray-400">
                                   Tijd
