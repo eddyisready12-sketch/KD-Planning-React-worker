@@ -5100,7 +5100,7 @@ export default function App() {
                                 className="grid w-max min-w-full"
                                 style={{ gridTemplateColumns: `88px repeat(${Math.max(dayRosterDriverColumns.length, 1)}, 240px)` }}
                               >
-                                <div className="sticky top-0 z-20 bg-white border-b border-r border-gray-200 px-3 py-3 text-xs font-bold uppercase tracking-wider text-gray-400">
+                                <div className="sticky left-0 top-0 z-30 bg-white border-b border-r border-gray-200 px-3 py-3 text-xs font-bold uppercase tracking-wider text-gray-400 shadow-[6px_0_10px_-10px_rgba(15,23,42,0.45)]">
                                   Tijd
                                 </div>
                                 {dayRosterDriverColumns.map(column => (
@@ -5130,7 +5130,7 @@ export default function App() {
                                     )}
                                   </div>
                                 ))}
-                                <div className="relative border-r border-gray-200 bg-gray-50/70">
+                                <div className="sticky left-0 z-20 border-r border-gray-200 bg-gray-50/95 shadow-[6px_0_10px_-10px_rgba(15,23,42,0.45)]">
                                   {dayRosterTimeSlots.map((slot) => (
                                     <div
                                       key={slot}
