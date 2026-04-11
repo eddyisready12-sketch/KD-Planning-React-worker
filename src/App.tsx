@@ -1046,6 +1046,8 @@ export default function App() {
   const [arrivedOrder, setArrivedOrder] = useState<Order | null>(null);
   const [arrivedTime, setArrivedTime] = useState('');
   const [arrivedHoldLoadTime, setArrivedHoldLoadTime] = useState(false);
+  const [etaEditOrder, setEtaEditOrder] = useState<Order | null>(null);
+  const [etaEditTime, setEtaEditTime] = useState('');
   const [selectedBunker, setSelectedBunker] = useState<{ lid: LineId, bunker: Bunker } | null>(null);
   const [calibrationMaterials, setCalibrationMaterials] = useState<CalibrationMaterial[]>([]);
   const [showAllMaterials, setShowAllMaterials] = useState(false);
@@ -1213,6 +1215,32 @@ export default function App() {
     setArrivedOrder(null);
     setArrivedTime('');
     setArrivedHoldLoadTime(false);
+  };
+
+  const openEtaEdit = (order: Order) => {
+    setEtaEditOrder(order);
+    setEtaEditTime(normalizeEta(order.eta) || '');
+  };
+
+  const closeEtaEdit = () => {
+    setEtaEditOrder(null);
+    setEtaEditTime('');
+  };
+
+  const handleEtaEditConfirm = async () => {
+    if (!etaEditOrder) return;
+    const confirmedEta = normalizeEta(etaEditTime);
+    if (!confirmedEta) return;
+
+    const nextOrders = orders.map(o =>
+      o.id === etaEditOrder.id
+        ? { ...o, eta: confirmedEta }
+        : o
+    );
+
+    await persistOrders(nextOrders, 'ETA sync mislukt', etaEditOrder.line, etaEditOrder.num);
+    setSelectedOrderForDetail(prev => prev?.id === etaEditOrder.id ? { ...prev, eta: confirmedEta } : prev);
+    closeEtaEdit();
   };
   const [bunkers, setBunkers] = useState<Record<LineId, Bunker[]>>(INITIAL_BUNKERS);
   const [notifications, setNotifications] = useState<Melding[]>([]);
@@ -5653,7 +5681,17 @@ export default function App() {
                                       <div className="text-[10px] font-medium text-gray-400">x{getOrderVolumeFactor(o).toFixed(2)}</div>
                                     </td>
                                     <td className="font-bold text-gr tabular-nums">{prodStart ? fmt(prodStart) : '--'}</td>
-                                    <td className="font-semibold tabular-nums text-gray-400">{o.eta || '--'}</td>
+                                    <td>
+                                      <button
+                                        type="button"
+                                        className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-semibold tabular-nums text-blue-600 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                                        onClick={() => openEtaEdit(o)}
+                                        title="ETA / laadtijd aanpassen"
+                                      >
+                                        {o.eta || '--'}
+                                        <Pencil size={12} />
+                                      </button>
+                                    </td>
                                     <td>
                                       {plannerState ? (
                                         <div className="flex flex-col gap-1">
@@ -5737,7 +5775,17 @@ export default function App() {
                                         </div>
                                       </div>
                                     </td>
-                                    <td className="font-bold tabular-nums">{o.eta || '--'}</td>
+                                    <td>
+                                      <button
+                                        type="button"
+                                        className="inline-flex items-center gap-1 rounded-lg px-2 py-1 font-bold tabular-nums text-blue-600 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                                        onClick={() => openEtaEdit(o)}
+                                        title="ETA / laadtijd aanpassen"
+                                      >
+                                        {o.eta || '--'}
+                                        <Pencil size={13} />
+                                      </button>
+                                    </td>
                                     <td className="font-semibold">
                                       <div>{o.vol} m3</div>
                                       <div className="text-[10px] font-medium text-gray-400">x{getOrderVolumeFactor(o).toFixed(2)}</div>
@@ -6885,7 +6933,72 @@ export default function App() {
             </div>
           )}
         </AnimatePresence>
-        
+
+        {/* ETA Edit Modal */}
+        <AnimatePresence>
+          {etaEditOrder && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={closeEtaEdit}>
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="p-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-900">ETA / laadtijd aanpassen</h2>
+                    <p className="text-sm text-gray-400">{etaEditOrder.customer}</p>
+                  </div>
+                  <button
+                    onClick={closeEtaEdit}
+                    className="p-2 hover:bg-gray-100 rounded-full text-gray-400 transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <div className="p-6">
+                  <p className="text-sm text-gray-500 mb-6">
+                    Pas alleen de verwachte laadtijd aan. De orderstatus blijft verder hetzelfde.
+                  </p>
+                  <div className="fg">
+                    <label className="fl">ETA / laadtijd *</label>
+                    <div className="relative">
+                      <input
+                        type="time"
+                        className="fi !pl-4 !pr-10"
+                        value={etaEditTime}
+                        onChange={(e) => setEtaEditTime(e.target.value)}
+                        autoFocus
+                      />
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">
+                        <Clock size={18} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-6 bg-gray-50/50 flex justify-end gap-3">
+                  <button
+                    className="px-6 py-2.5 rounded-xl font-bold text-gray-500 hover:bg-gray-200 transition-colors"
+                    onClick={closeEtaEdit}
+                  >
+                    Annuleren
+                  </button>
+                  <button
+                    className="px-8 py-2.5 rounded-xl font-bold text-white bg-gr hover:bg-gr/90 transition-colors disabled:opacity-50"
+                    onClick={handleEtaEditConfirm}
+                    disabled={!normalizeEta(etaEditTime)}
+                  >
+                    Opslaan
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
         {/* Order Detail Modal */}
         <AnimatePresence>
           {selectedOrderForDetail && (
