@@ -87,6 +87,7 @@ type SharedAppStateRow = {
 
 export type SharedDriverInput = {
   name: string;
+  active?: boolean;
   company?: string;
   truckPlate?: string;
   trailerPlate?: string;
@@ -94,6 +95,11 @@ export type SharedDriverInput = {
   steeringAxles?: number | null;
   maxWeightKg?: number | null;
   notes?: string;
+};
+
+export type SharedDriver = SharedDriverInput & {
+  id?: string;
+  active: boolean;
 };
 
 type SharedDriverRow = {
@@ -111,6 +117,23 @@ type SharedDriverRow = {
   updated_by?: string | null;
   updated_at?: string | null;
 };
+
+function rowToSharedDriver(row: SharedDriverRow): SharedDriver | null {
+  const name = String(row.name || '').trim();
+  if (!name) return null;
+  return {
+    id: row.id || undefined,
+    name,
+    active: row.active !== false,
+    company: row.company || '',
+    truckPlate: row.truck_plate || '',
+    trailerPlate: row.trailer_plate || '',
+    vehicleHeightM: row.vehicle_height_m === null || row.vehicle_height_m === undefined ? null : parseNumber(row.vehicle_height_m),
+    steeringAxles: row.steering_axles === null || row.steering_axles === undefined ? null : parseNumber(row.steering_axles),
+    maxWeightKg: row.max_weight_kg === null || row.max_weight_kg === undefined ? null : parseNumber(row.max_weight_kg),
+    notes: row.notes || ''
+  };
+}
 
 type SharedTriggerRow = {
   id?: string | null;
@@ -690,11 +713,19 @@ export async function resolveIssueInSupabase(line: LineId): Promise<void> {
 }
 
 export async function fetchDriverListFromSupabase(): Promise<string[]> {
+  const drivers = await fetchDriversFromSupabase();
+  return drivers
+    .filter(driver => driver.active)
+    .map(driver => driver.name)
+    .sort((a, b) => a.localeCompare(b, 'nl-NL'));
+}
+
+export async function fetchDriversFromSupabase(): Promise<SharedDriver[]> {
   if (!isSupabaseConfigured()) return [];
 
   const { data: rows, error } = await supabase
     .from('shared_drivers')
-    .select('name,active')
+    .select('*')
     .eq('workspace', SUPABASE_WORKSPACE)
     .order('name', { ascending: true });
 
@@ -702,14 +733,10 @@ export async function fetchDriverListFromSupabase(): Promise<string[]> {
     throw new Error(`Supabase fout: ${error.message}`);
   }
 
-  return Array.from(
-    new Set(
-      (rows || [])
-        .filter(row => (row as SharedDriverRow).active !== false)
-        .map(row => String((row as SharedDriverRow).name || '').trim())
-        .filter(Boolean)
-    )
-  ).sort((a, b) => a.localeCompare(b, 'nl-NL'));
+  return (rows || [])
+    .map(row => rowToSharedDriver(row as SharedDriverRow))
+    .filter((driver): driver is SharedDriver => driver !== null)
+    .sort((a, b) => a.name.localeCompare(b.name, 'nl-NL'));
 }
 
 export async function fetchPlannerTriggersFromSupabase(): Promise<PlannerTrigger[]> {
@@ -774,7 +801,7 @@ export async function upsertDriverInSupabase(driver: SharedDriverInput): Promise
   const payload = {
     workspace: SUPABASE_WORKSPACE,
     name,
-    active: true,
+    active: driver.active ?? true,
     company: driver.company?.trim() || null,
     truck_plate: driver.truckPlate?.trim() || null,
     trailer_plate: driver.trailerPlate?.trim() || null,
@@ -814,6 +841,25 @@ export async function upsertDriverInSupabase(driver: SharedDriverInput): Promise
 
   if (error) {
     throw new Error(`Supabase insert fout: ${error.message}`);
+  }
+}
+
+export async function setDriverActiveInSupabase(name: string, active: boolean): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+
+  const { error } = await supabase
+    .from('shared_drivers')
+    .update({
+      active,
+      updated_at: new Date().toISOString()
+    })
+    .eq('workspace', SUPABASE_WORKSPACE)
+    .ilike('name', trimmed);
+
+  if (error) {
+    throw new Error(`Supabase update fout: ${error.message}`);
   }
 }
 

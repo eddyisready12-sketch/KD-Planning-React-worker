@@ -10,7 +10,7 @@ import {
   fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides
 } from './utils';
 import { fetchOrdersFromSheet, fetchBunkersFromSheet, importOrdersFromCsvFile, CalibrationMaterial } from './services/sheetService';
-import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriverListFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, upsertDriverInSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow } from './services/supabaseService';
+import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriversFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, setDriverActiveInSupabase, upsertDriverInSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow, type SharedDriver } from './services/supabaseService';
 import { supabase } from './services/supabaseClient';
 import { 
   LayoutDashboard, ClipboardList, Database, Settings, Bell, 
@@ -283,6 +283,7 @@ export default function App() {
   const [draggedDriverName, setDraggedDriverName] = useState<string>('');
   const [draggedDayRosterOrderId, setDraggedDayRosterOrderId] = useState<number | null>(null);
   const [sharedDriverNames, setSharedDriverNames] = useState<string[]>([]);
+  const [sharedDrivers, setSharedDrivers] = useState<SharedDriver[]>([]);
   const [plannerTriggers, setPlannerTriggers] = useState<PlannerTrigger[]>([]);
   const [newDriverName, setNewDriverName] = useState('');
   const [showDriverForm, setShowDriverForm] = useState(false);
@@ -751,9 +752,11 @@ export default function App() {
   const refreshDriversFromSupabase = useCallback(async () => {
     if (!isSupabaseConfigured()) return;
     try {
-      const names = await fetchDriverListFromSupabase();
-      setSharedDriverNames(names);
-      setDriverSyncDebug(`Supabase chauffeurs: ${names.length}`);
+      const drivers = await fetchDriversFromSupabase();
+      const activeNames = drivers.filter(driver => driver.active).map(driver => driver.name);
+      setSharedDrivers(drivers);
+      setSharedDriverNames(activeNames);
+      setDriverSyncDebug(`Supabase chauffeurs: ${activeNames.length} actief, ${drivers.length - activeNames.length} afwezig`);
     } catch {
       setDriverSyncDebug('Supabase chauffeurs refresh mislukt');
       // keep current local state if supabase driver refresh fails
@@ -1298,14 +1301,15 @@ export default function App() {
     if (sharedDriverNames.length > 0) return;
     if (orderDriverNames.length === 0) return;
 
-    const seededDrivers = Array.from(new Set(orderDriverNames))
-      .map(name => String(name || '').trim())
-      .filter(Boolean)
-      .sort((a, b) => a.localeCompare(b, 'nl-NL'));
+      const seededDrivers = Array.from(new Set(orderDriverNames))
+        .map(name => String(name || '').trim())
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b, 'nl-NL'));
 
     if (seededDrivers.length === 0) return;
 
     setSharedDriverNames(seededDrivers);
+    setSharedDrivers(seededDrivers.map(name => ({ name, active: true })));
     setDriverSyncDebug(`Supabase chauffeurs gevuld uit orderdata: ${seededDrivers.length}`);
 
     writeDriverListToSupabase(seededDrivers).catch((err) => {
@@ -1381,6 +1385,10 @@ export default function App() {
       .sort((a, b) => a.localeCompare(b, 'nl-NL'));
 
     setSharedDriverNames(nextNames);
+    setSharedDrivers(prev => {
+      const without = prev.filter(driver => driver.name.toLowerCase() !== trimmed.toLowerCase());
+      return [...without, { name: trimmed, active: true }].sort((a, b) => a.name.localeCompare(b.name, 'nl-NL'));
+    });
     setSelectedDriverName(trimmed);
     setNewDriverName('');
     setNewDriverForm(EMPTY_DRIVER_FORM);
@@ -1406,7 +1414,7 @@ export default function App() {
         notes: newDriverForm.notes
       });
       const namesAfter = await fetchDriverListFromSupabase();
-      setSharedDriverNames(namesAfter);
+      await refreshDriversFromSupabase();
       if (!namesAfter.some(name => name.toLowerCase() === trimmed.toLowerCase())) {
         throw new Error(`Naam niet teruggevonden in Supabase (${trimmed})`);
       }
@@ -1438,6 +1446,39 @@ export default function App() {
       }, ...prev]);
     } finally {
       setIsSavingDriver(false);
+    }
+  }
+
+  async function handleToggleDriverAbsent(driverName: string, absent: boolean) {
+    const trimmed = driverName.trim();
+    if (!trimmed) return;
+
+    setSharedDrivers(prev => prev.map(driver =>
+      driver.name === trimmed ? { ...driver, active: !absent } : driver
+    ));
+    setSharedDriverNames(prev => absent ? prev.filter(name => name !== trimmed) : Array.from(new Set([...prev, trimmed])).sort((a, b) => a.localeCompare(b, 'nl-NL')));
+    setDriverSyncDebug(`${trimmed} ${absent ? 'op afwezig gezet' : 'weer beschikbaar'}`);
+
+    if (!isSupabaseConfigured()) return;
+
+    try {
+      await setDriverActiveInSupabase(trimmed, !absent);
+      await refreshDriversFromSupabase();
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Chauffeurstatus opslaan mislukt';
+      setDriverSyncDebug(`Afwezigheid sync mislukt: ${trimmed}`);
+      setNotifications(prev => [{
+        id: Date.now(),
+        type: 'fout',
+        icon: 'ERR',
+        titel: 'Chauffeurstatus sync mislukt',
+        tekst: errorMsg,
+        lijn: null,
+        orderNum: null,
+        tijd: new Date(),
+        gelezen: false
+      }, ...prev]);
+      await refreshDriversFromSupabase();
     }
   }
   const [lineTiming, setLineTiming] = useState<Record<LineId, LineTimingSettings>>(() => {
@@ -3907,7 +3948,9 @@ export default function App() {
       }
       driverCounts.set(name, existing);
     });
+    const driverActiveMap = new Map(sharedDrivers.map(driver => [driver.name, driver.active]));
     const allDriverNames = Array.from(new Set([
+      ...sharedDrivers.map(driver => driver.name),
       ...sharedDriverNames,
       ...Array.from(driverCounts.keys())
     ]));
@@ -3920,11 +3963,12 @@ export default function App() {
         lines: Array.from(meta.lines).sort((a, b) => a - b),
         totalVolume: meta.totalVolume,
         firstStart: meta.firstStart,
-        lastEnd: meta.lastEnd
+        lastEnd: meta.lastEnd,
+        active: driverActiveMap.get(name) ?? true
       };
       })
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'nl-NL'));
-  }, [plannedActiveOrders, plannerLineFilter, lineTimelineEntryByOrderId, sharedDriverNames]);
+  }, [plannedActiveOrders, plannerLineFilter, lineTimelineEntryByOrderId, sharedDriverNames, sharedDrivers]);
 
   const visiblePlannerDrivers = useMemo(() => {
     const q = chauffeurSearch.trim().toLowerCase();
@@ -4370,6 +4414,15 @@ export default function App() {
                 <div className="flex items-center justify-between mb-4.5">
                   <h1 className="text-xl font-bold">Operator Dashboard</h1>
                   <div className="flex gap-2">
+                    <button
+                      className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                      onClick={() => {
+                        setView('planner');
+                        setPlannerTab('wachtrij');
+                      }}
+                    >
+                      Order wachtrij
+                    </button>
                     <button
                       className={`rounded-xl border px-4 py-2 text-sm font-semibold ${
                         activeIssue?.soort === 'storing'
@@ -4863,8 +4916,8 @@ export default function App() {
                   <div className="flex overflow-x-auto no-scrollbar">
                     {[
                       { id: 'schema', lbl: 'Lijn Schema' },
-                      { id: 'dagrooster', lbl: 'Dagrooster' },
                       { id: 'wachtrij', lbl: 'Order Wachtrij' },
+                      { id: 'dagrooster', lbl: 'Dagrooster' },
                       { id: 'chauffeurs', lbl: `Chauffeurs (${plannerDrivers.length})` },
                       { id: 'vrachtwagens', lbl: 'Vrachtwagenritten' },
                       { id: 'voltooid', lbl: `Voltooid (${completedOrders.length})` }
@@ -5847,21 +5900,39 @@ export default function App() {
 
                           <div className="space-y-2 pr-1">
                             {visiblePlannerDriversSorted.length > 0 ? visiblePlannerDriversSorted.map(driver => (
-                              <button
+                              <div
                                 key={driver.name}
-                                draggable
-                                className={`w-full text-left rounded-xl border p-4 transition-all ${selectedDriverName === driver.name ? 'border-gr bg-green-50' : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'}`}
+                                draggable={driver.active}
+                                role="button"
+                                tabIndex={0}
+                                className={`w-full text-left rounded-xl border p-4 transition-all ${selectedDriverName === driver.name ? 'border-gr bg-green-50' : driver.active ? 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50' : 'border-amber-200 bg-amber-50/50 opacity-75'}`}
                                 onClick={() => setSelectedDriverName(prev => prev === driver.name ? '' : driver.name)}
                                 onDragStart={(e) => {
+                                  if (!driver.active) {
+                                    e.preventDefault();
+                                    return;
+                                  }
                                   e.dataTransfer.setData('text/plain', driver.name);
                                   e.dataTransfer.effectAllowed = 'move';
                                   setDraggedDriverName(driver.name);
                                 }}
                                 onDragEnd={() => setDraggedDriverName('')}
+                                onKeyDown={(e) => {
+                                  if (e.key !== 'Enter' && e.key !== ' ') return;
+                                  e.preventDefault();
+                                  setSelectedDriverName(prev => prev === driver.name ? '' : driver.name);
+                                }}
                               >
                                 <div className="flex items-center justify-between gap-3">
                                   <div className="min-w-0">
-                                    <div className="font-bold text-gray-800 truncate">{driver.name}</div>
+                                    <div className="flex items-center gap-2">
+                                      <div className="font-bold text-gray-800 truncate">{driver.name}</div>
+                                      {!driver.active && (
+                                        <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-700">
+                                          Afwezig
+                                        </span>
+                                      )}
+                                    </div>
                                     <div className="text-sm text-gray-400">{driver.count} gekoppelde orders</div>
                                     <div className="mt-1 text-xs text-gray-400">
                                       {driver.lines.map(line => `ML${line}`).join(' - ')}
@@ -5876,8 +5947,21 @@ export default function App() {
                                       </div>
                                     )}
                                   </div>
-                                  <div className={`rounded-full px-3 py-1 text-xs font-semibold ${selectedDriverName === driver.name ? 'bg-green-100 text-gr' : 'bg-gray-100 text-gray-500'}`}>
-                                    {driver.count}
+                                  <div className="flex shrink-0 flex-col items-end gap-2">
+                                    <div className={`rounded-full px-3 py-1 text-xs font-semibold ${selectedDriverName === driver.name ? 'bg-green-100 text-gr' : 'bg-gray-100 text-gray-500'}`}>
+                                      {driver.count}
+                                    </div>
+                                    <label
+                                      className="flex items-center gap-1.5 text-[11px] font-semibold text-gray-500"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={!driver.active}
+                                        onChange={(e) => void handleToggleDriverAbsent(driver.name, e.target.checked)}
+                                      />
+                                      Afwezig
+                                    </label>
                                   </div>
                                 </div>
                                 {driver.conflictCount > 0 && (
@@ -5885,7 +5969,7 @@ export default function App() {
                                     {driver.conflictCount} conflict{driver.conflictCount === 1 ? '' : 'en'}
                                   </div>
                                 )}
-                              </button>
+                              </div>
                             )) : (
                               <div className="rounded-xl border border-dashed border-gray-200 p-6 text-center text-sm text-gray-400">
                                 Geen chauffeurs gevonden voor deze zoekopdracht
