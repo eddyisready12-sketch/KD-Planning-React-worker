@@ -1215,12 +1215,16 @@ export default function App() {
     if (!arrivedOrder) return;
     const confirmedEta = normalizeEta(arrivedTime);
     if (!confirmedEta) return;
-    const nextOrders = orders.map(o => 
-      o.id === arrivedOrder.id 
-        ? { ...o, eta: o.eta, arrivedTime: confirmedEta, status: 'arrived', arrived: true, holdLoadTime: arrivedHoldLoadTime } 
-        : o
-    );
-    await persistOrders(nextOrders, 'Order sync mislukt', arrivedOrder.line, arrivedOrder.num);
+    const updatedOrder: Order = {
+      ...arrivedOrder,
+      eta: confirmedEta,
+      arrivedTime: confirmedEta,
+      status: 'arrived',
+      arrived: true,
+      holdLoadTime: arrivedHoldLoadTime
+    };
+    const nextOrders = orders.map(o => o.id === arrivedOrder.id ? updatedOrder : o);
+    await persistSingleOrder(updatedOrder, nextOrders, 'Order sync mislukt');
     setArrivedOrder(null);
     setArrivedTime('');
     setArrivedHoldLoadTime(false);
@@ -1241,13 +1245,14 @@ export default function App() {
     const confirmedEta = normalizeEta(etaEditTime);
     if (!confirmedEta) return;
 
+    const updatedOrder: Order = { ...etaEditOrder, eta: confirmedEta };
     const nextOrders = orders.map(o =>
       o.id === etaEditOrder.id
-        ? { ...o, eta: confirmedEta }
+        ? updatedOrder
         : o
     );
 
-    await persistOrders(nextOrders, 'ETA sync mislukt', etaEditOrder.line, etaEditOrder.num);
+    await persistSingleOrder(updatedOrder, nextOrders, 'ETA sync mislukt');
     setSelectedOrderForDetail(prev => prev?.id === etaEditOrder.id ? { ...prev, eta: confirmedEta } : prev);
     closeEtaEdit();
   };
@@ -1300,6 +1305,32 @@ export default function App() {
         tekst: errorMsg,
         lijn: line,
         orderNum,
+        tijd: new Date(),
+        gelezen: false
+      }, ...prev]);
+    }
+  }
+
+  async function persistSingleOrder(
+    nextOrder: Order,
+    nextOrders: Order[],
+    errorTitle = 'Order sync mislukt'
+  ) {
+    setOrders(nextOrders);
+    if (!isSupabaseConfigured()) return;
+
+    try {
+      await writeOrdersToSupabase([nextOrder]);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Opslaan naar Supabase mislukt';
+      setNotifications(prev => [{
+        id: Date.now(),
+        type: 'fout',
+        icon: 'ERR',
+        titel: errorTitle,
+        tekst: errorMsg,
+        lijn: nextOrder.line,
+        orderNum: nextOrder.num,
         tijd: new Date(),
         gelezen: false
       }, ...prev]);
@@ -3684,8 +3715,15 @@ export default function App() {
             const productionDurationMinutes = Math.max(dayRosterSlotMinutes, productionEndMinutes - productionStartMinutes);
             const loadReferenceTime = getOrderLoadReferenceTime(entry.order);
             const loadReferenceMinutes = loadReferenceTime ? timeStringToMinutes(loadReferenceTime, productionStartMinutes) : null;
-            const startMinutes = loadReferenceMinutes ?? productionStartMinutes;
-            const endMinutes = startMinutes + productionDurationMinutes;
+            const rawStartMinutes = loadReferenceMinutes ?? productionStartMinutes;
+            const startMinutes = Math.min(
+              Math.max(rawStartMinutes, dayRosterStartMinutes),
+              dayRosterEndMinutes
+            );
+            const endMinutes = Math.min(
+              Math.max(startMinutes + dayRosterSlotMinutes, startMinutes + productionDurationMinutes),
+              dayRosterEndMinutes + dayRosterSlotMinutes
+            );
             const driverName = String(entry.order.driver || '').trim();
             const columnKey = driverName ? `driver:${driverName}` : 'unassigned';
             const columnLabel = driverName ? driverName : 'Ongekoppeld';
@@ -4288,6 +4326,28 @@ export default function App() {
     e.dataTransfer.setData('text/plain', String(orderId));
     e.dataTransfer.setData('text/dayroster-order-id', String(orderId));
     e.dataTransfer.effectAllowed = 'move';
+
+    const order = orders.find(o => o.id === orderId);
+    const dragPreview = document.createElement('div');
+    dragPreview.textContent = order
+      ? `${order.customer} - ${normalizeEta(order.eta) || fmt(new Date())}`
+      : 'Order verplaatsen';
+    dragPreview.style.position = 'fixed';
+    dragPreview.style.left = '-1000px';
+    dragPreview.style.top = '-1000px';
+    dragPreview.style.width = '220px';
+    dragPreview.style.padding = '10px 12px';
+    dragPreview.style.border = '1px solid #bbf7d0';
+    dragPreview.style.borderRadius = '14px';
+    dragPreview.style.background = '#f0fdf4';
+    dragPreview.style.color = '#14532d';
+    dragPreview.style.font = '700 13px system-ui, sans-serif';
+    dragPreview.style.boxShadow = '0 14px 30px rgba(15, 23, 42, 0.18)';
+    dragPreview.style.pointerEvents = 'none';
+    document.body.appendChild(dragPreview);
+    e.dataTransfer.setDragImage(dragPreview, 18, 18);
+    window.setTimeout(() => dragPreview.remove(), 0);
+
     setDraggedDayRosterOrderId(orderId);
   };
 
@@ -4305,12 +4365,20 @@ export default function App() {
 
   const handleResetArrived = async (id: number) => {
     const target = orders.find(o => o.id === id);
+    if (!target) return;
+    const updatedOrder: Order = {
+      ...target,
+      status: 'planned',
+      arrived: false,
+      arrivedTime: undefined,
+      holdLoadTime: false
+    };
     const nextOrders = orders.map(o =>
       o.id === id && o.status === 'arrived'
-        ? { ...o, status: 'planned', holdLoadTime: false }
+        ? updatedOrder
         : o
     );
-    await persistOrders(nextOrders, 'Order sync mislukt', target?.line ?? null, target?.num ?? null);
+    await persistSingleOrder(updatedOrder, nextOrders, 'Order sync mislukt');
   };
 
   return (
