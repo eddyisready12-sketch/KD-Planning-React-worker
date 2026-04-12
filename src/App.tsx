@@ -394,7 +394,10 @@ export default function App() {
         }
       
       setOrders(prev => {
-        const orderKey = (o: Order) => `${o.num}|${o.rit}|${o.recipe}|${o.line}`;
+        const orderKey = (o: Order) => {
+          const productionOrder = String(o.productionOrder || '').trim();
+          return productionOrder ? `po:${productionOrder}` : `${o.num}|${o.rit}|${o.recipe}|${o.line}`;
+        };
         const importedByKey = new Map(importedOrders.map(o => [orderKey(o), o]));
 
         // Behoud alleen orders die lokaal al draaien of voltooid zijn als ze niet meer in de sheet staan.
@@ -470,7 +473,10 @@ export default function App() {
 
   const mergeImportedOrdersIntoState = (importedOrders: Order[]) => {
     setOrders(prev => {
-      const orderKey = (o: Order) => `${o.num}|${o.rit}|${o.recipe}|${o.line}`;
+      const orderKey = (o: Order) => {
+        const productionOrder = String(o.productionOrder || '').trim();
+        return productionOrder ? `po:${productionOrder}` : `${o.num}|${o.rit}|${o.recipe}|${o.line}`;
+      };
       const importedByKey = new Map(importedOrders.map(o => [orderKey(o), o]));
       const completed = prev.filter(o => o.status === 'completed');
       const active = prev.filter(o => o.status === 'running');
@@ -987,7 +993,10 @@ export default function App() {
         const sharedOrders = await fetchOrdersFromSupabase();
         if (sharedOrders.length > 0) {
           setOrders(prev => {
-            const orderKey = (o: Order) => `${o.num}|${o.rit}|${o.recipe}|${o.line}`;
+            const orderKey = (o: Order) => {
+              const productionOrder = String(o.productionOrder || '').trim();
+              return productionOrder ? `po:${productionOrder}` : `${o.num}|${o.rit}|${o.recipe}|${o.line}`;
+            };
             const prevByKey = new Map(prev.map(o => [orderKey(o), o]));
             return sharedOrders.map(order => {
               const existing = prevByKey.get(orderKey(order));

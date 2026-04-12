@@ -21,6 +21,25 @@ interface GvizResponse {
   errors?: { message: string; detailed_message?: string }[];
 }
 
+function stableOrderHash(key: string): number {
+  return Math.abs(key.split('').reduce((a, b) => {
+    a = ((a << 5) - a) + b.charCodeAt(0);
+    return a & a;
+  }, 0));
+}
+
+function getImportedOrderKey(order: Order): string {
+  const productionOrder = String(order.productionOrder || '').trim();
+  if (productionOrder) return `po:${productionOrder}`;
+
+  return [
+    order.num,
+    order.rit || '',
+    order.recipe || '',
+    order.line
+  ].join('|');
+}
+
 const HEADER_MAP: Record<string, string[]> = {
   recipe: ['Item / recept', 'Item/recept', 'Artikel Code', 'itemrecept', 'item_recept', 'ProductCode', 'recipe', 'recept', 'artikel', 'artikelnummer', 'productcode', 'rawcode', 'art_code', 'art_nr', 'artnr', 'mix'],
   orderNum: ['OrderNummer', 'order', 'ordernr', 'ordernummer', 'order_num', 'num', 'bestelnummer', 'opdracht', 'opdrachtnummer'],
@@ -317,7 +336,7 @@ export async function fetchOrdersFromSheet(url: string): Promise<Order[]> {
   // Collapse rows with same Order Identity
   const collapsed = new Map<string, Order>();
   allOrders.forEach(row => {
-    const key = `${row.num}|${row.rit}|${row.recipe}|${row.line}`;
+    const key = getImportedOrderKey(row);
     if (collapsed.has(key)) {
       const existing = collapsed.get(key)!;
       if (row.components.length) {
@@ -325,7 +344,7 @@ export async function fetchOrdersFromSheet(url: string): Promise<Order[]> {
       }
     } else {
       // Use the key as a stable ID
-      row.id = Math.abs(key.split('').reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a; }, 0));
+      row.id = stableOrderHash(key);
       collapsed.set(key, row);
     }
   });
@@ -382,14 +401,14 @@ export async function importOrdersFromCsvFile(file: File, fallbackDate?: string)
 
   const collapsed = new Map<string, Order>();
   importedRows.forEach(row => {
-    const key = `${row.num}|${row.rit}|${row.recipe}|${row.line}`;
+    const key = getImportedOrderKey(row);
     if (collapsed.has(key)) {
       const existing = collapsed.get(key)!;
       if (row.components.length) {
         existing.components.push(...row.components);
       }
     } else {
-      row.id = Math.abs(key.split('').reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a; }, 0));
+      row.id = stableOrderHash(key);
       collapsed.set(key, row);
     }
   });

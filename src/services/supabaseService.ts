@@ -183,7 +183,7 @@ function rowToPlannerTrigger(row: SharedTriggerRow): PlannerTrigger | null {
 
 function normalizeStatus(status: string | null | undefined, arrived?: boolean | null): Order['status'] {
   const normalized = String(status || '').trim().toLowerCase();
-  if (normalized === 'completed' || normalized === 'voltooid') return 'completed';
+  if (normalized === 'closed' || normalized === 'completed' || normalized === 'voltooid') return 'completed';
   if (normalized === 'running' || normalized === 'gestart') return 'running';
   if (normalized === 'arrived' || normalized === 'gearriveerd' || arrived) return 'arrived';
   return 'planned';
@@ -213,6 +213,30 @@ function recipeRowToComponent(row: SharedRecipeComponentRow): OrderComponent | n
   };
 }
 
+function stableOrderHash(key: string): number {
+  return Math.abs(key.split('').reduce((a, b) => {
+    a = ((a << 5) - a) + b.charCodeAt(0);
+    return a & a;
+  }, 0));
+}
+
+function getSharedOrderKey(order: Pick<Order, 'num' | 'rit' | 'recipe' | 'line' | 'productionOrder'>): string {
+  const productionOrder = String(order.productionOrder || '').trim();
+  if (productionOrder) return `po:${productionOrder}`;
+  return [order.num, order.rit || '', order.recipe || '', order.line].join('|');
+}
+
+function getSharedOrderRowKey(row: Pick<SharedOrderRow, 'order_num' | 'rit_num' | 'recipe' | 'line_id' | 'production_order'>): string {
+  const productionOrder = String(row.production_order || '').trim();
+  if (productionOrder) return `po:${productionOrder}`;
+  return [
+    String(row.order_num || '').trim(),
+    String(row.rit_num || '').trim(),
+    String(row.recipe || '').trim(),
+    String(row.line_id || '').trim()
+  ].join('|');
+}
+
 function rowToOrder(
   row: SharedOrderRow,
   components: OrderComponent[],
@@ -232,7 +256,7 @@ function rowToOrder(
       : (status === 'arrived' && !!normalizeEta(String(row.arrived_time || row.eta || '')) ? 1 : ([1, 2, 3].includes(priority) ? (priority as 1 | 2 | 3) : 2));
 
   return {
-    id: Number(String(row.order_num).replace(/\D/g, '')) || Date.now(),
+    id: stableOrderHash(getSharedOrderRowKey(row)),
     num: String(row.order_num),
     rit: String(row.rit_num || ''),
     productionOrder: row.production_order || undefined,
@@ -436,19 +460,19 @@ export async function writeOrdersToSupabase(orders: Order[], options?: { preserv
 
   const uniqueOrders = new Map<string, Order>();
   orders.forEach(order => {
-    uniqueOrders.set(`${SUPABASE_WORKSPACE}|${order.num}`, order);
+    uniqueOrders.set(`${SUPABASE_WORKSPACE}|${getSharedOrderKey(order)}`, order);
   });
 
-  const existingDatesByOrderNum = new Map<string, string>();
+  const existingDatesByOrderKey = new Map<string, string>();
   if (options?.preserveExistingSchedule) {
-    const existingRows = await supabaseFetch<Array<Pick<SharedOrderRow, 'order_num' | 'order_date'>>>(
-      `shared_orders?workspace=eq.${encodeURIComponent(SUPABASE_WORKSPACE)}&select=order_num,order_date`
+    const existingRows = await supabaseFetch<Array<Pick<SharedOrderRow, 'order_num' | 'rit_num' | 'recipe' | 'line_id' | 'production_order' | 'order_date'>>>(
+      `shared_orders?workspace=eq.${encodeURIComponent(SUPABASE_WORKSPACE)}&select=order_num,rit_num,recipe,line_id,production_order,order_date`
     );
     existingRows.forEach(row => {
-      const orderNum = String(row.order_num || '').trim();
+      const orderKey = getSharedOrderRowKey(row);
       const orderDate = String(row.order_date || '').trim();
-      if (orderNum && orderDate) {
-        existingDatesByOrderNum.set(orderNum, orderDate);
+      if (orderKey && orderDate) {
+        existingDatesByOrderKey.set(orderKey, orderDate);
       }
     });
   }
@@ -459,13 +483,14 @@ export async function writeOrdersToSupabase(orders: Order[], options?: { preserv
         ? 1
         : (order.status === 'arrived' && !!normalizeEta(order.arrivedTime || order.eta) ? 1 : 2);
     const preservedOrderDate =
-      (options?.preserveExistingSchedule ? existingDatesByOrderNum.get(order.num) : null) || order.date || null;
+      (options?.preserveExistingSchedule ? existingDatesByOrderKey.get(getSharedOrderKey(order)) : null) || order.date || null;
+    const productionOrder = String(order.productionOrder || '').trim() || order.num;
 
     return {
       workspace: SUPABASE_WORKSPACE,
       order_num: order.num,
       rit_num: order.rit || null,
-      production_order: order.productionOrder || null,
+      production_order: productionOrder,
       customer: order.customer || null,
       recipe: order.recipe || null,
       line_id: order.line,
@@ -487,7 +512,7 @@ export async function writeOrdersToSupabase(orders: Order[], options?: { preserv
   });
 
   for (const batch of chunkArray(orderRows, 100)) {
-    await supabaseWrite('shared_orders?on_conflict=workspace,order_num', batch);
+    await supabaseWrite('shared_orders?on_conflict=workspace,production_order', batch);
   }
 }
 
