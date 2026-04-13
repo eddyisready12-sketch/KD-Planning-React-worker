@@ -2264,13 +2264,14 @@ export default function App() {
 
   const getEffectivePriority = (order: Order): 1 | 2 | 3 => {
     const nowMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
+    const nowOperationalMinutes = nowMinutes - (5 * 60);
     const pkg = normalizePkg(order.pkg);
     if (priorityOnePackages.has(pkg)) return 1;
     if (pkg === 'bulk') {
       if (order.status === 'arrived' && order.holdLoadTime) return 1;
       const normalizedEta = getOrderLoadReferenceTime(order);
       const etaMinutes = etaToMins(normalizedEta);
-      const loadWindowOpen = etaMinutes !== null && nowMinutes >= etaMinutes - 30;
+      const loadWindowOpen = etaMinutes !== null && nowOperationalMinutes >= etaMinutes - 30;
       return order.status === 'arrived' && loadWindowOpen ? 1 : 2;
     }
     return [1, 2, 3].includes(order.prio) ? order.prio : 2;
@@ -3536,12 +3537,13 @@ export default function App() {
     nowMinutes: number
   ): { label: string; cls: string; reason: string; key: 'direct' | 'prep' | 'wait' } => {
     const lineIssue = storingen[order.line];
+    const nowOperationalMinutes = nowMinutes - (5 * 60);
     const normalizedEta = getOrderLoadReferenceTime(order);
     const etaMinutes = etaToMins(normalizedEta);
     const pkg = normalizePkg(order.pkg);
     const missingBulkLoadTime = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && !normalizedEta;
-    const waitsForBulk = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes - 30;
-    const waitsForHeldLoadTime = order.status === 'arrived' && !!order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes;
+    const waitsForBulk = pkg === 'bulk' && !order.holdLoadTime && etaMinutes !== null && nowOperationalMinutes < etaMinutes - 30;
+    const waitsForHeldLoadTime = order.status === 'arrived' && !!order.holdLoadTime && etaMinutes !== null && nowOperationalMinutes < etaMinutes;
     const orderLineBunkers = bunkers[order.line] || lineBunkers;
     const needsRecipeBunkerPrep = !isOrderDirectlyRunnable(order, orderLineBunkers);
     const needsCleaning = index === 0 && hasProlineCleaningTrigger(order);
@@ -3589,12 +3591,13 @@ export default function App() {
     nowMinutes: number
   ): { label: string; cls: string; reason: string; key: 'direct' | 'prep' | 'wait' } => {
     const lineIssue = storingen[order.line];
+    const nowOperationalMinutes = nowMinutes - (5 * 60);
     const normalizedEta = getOrderLoadReferenceTime(order);
     const etaMinutes = etaToMins(normalizedEta);
     const pkg = normalizePkg(order.pkg);
     const missingBulkLoadTime = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && !normalizedEta;
-    const waitsForBulk = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes - 30;
-    const waitsForHeldLoadTime = order.status === 'arrived' && !!order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes;
+    const waitsForBulk = pkg === 'bulk' && !order.holdLoadTime && etaMinutes !== null && nowOperationalMinutes < etaMinutes - 30;
+    const waitsForHeldLoadTime = order.status === 'arrived' && !!order.holdLoadTime && etaMinutes !== null && nowOperationalMinutes < etaMinutes;
     const orderLineBunkers = bunkers[order.line] || lineBunkers;
     const needsRecipeBunkerPrep = !isOrderDirectlyRunnable(order, orderLineBunkers);
     const bunkerPrepReason = getOrderBunkerPrepReason(order, orderLineBunkers);
