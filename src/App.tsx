@@ -5462,8 +5462,20 @@ export default function App() {
                             const plannerDisplayTimeline = filteredPlannerDisplayEntriesByLine[lid].filter(entry => {
                               const o = entry.order;
                               const s = plannerSearch.toLowerCase();
+                              if (o.status === 'running') return false;
                               return o.customer.toLowerCase().includes(s) || o.num.includes(s) || o.recipe.toLowerCase().includes(s);
                             });
+                            const runningEntry = lineTimelineByLine[lid].find(entry => entry.order.status === 'running') || null;
+                            const runningOrder = runningEntry?.order || null;
+                            const runningStart = runningEntry && runningOrder
+                              ? (getRunningOrderStart(runningOrder) || runningEntry.prodStart)
+                              : null;
+                            const runningEnd = runningEntry && runningStart
+                              ? new Date(runningStart.getTime() + runningEntry.duration * 60000)
+                              : null;
+                            const runningProgress = runningEntry && runningStart
+                              ? Math.max(0, Math.min(99, ((currentTime.getTime() - runningStart.getTime()) / (runningEntry.duration * 60000)) * 100))
+                              : 0;
                             
                               const lineIssue = storingen[lid];
                           return (
@@ -5552,6 +5564,82 @@ export default function App() {
                                         : 'border-blue-200 bg-white/80 text-blue-800'
                                     }`}>
                                       Actief
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                              {runningEntry && runningOrder && runningStart && runningEnd && (
+                                <div
+                                  className="border-b border-green-200 bg-green-50/70 px-4 py-4 cursor-pointer hover:bg-green-50 transition-colors"
+                                  role="button"
+                                  tabIndex={0}
+                                  onClick={() => setSelectedOrderForDetail(runningOrder)}
+                                  onKeyDown={(e) => {
+                                    if (e.key !== 'Enter' && e.key !== ' ') return;
+                                    e.preventDefault();
+                                    setSelectedOrderForDetail(runningOrder);
+                                  }}
+                                >
+                                  <div className="flex items-start gap-3">
+                                    <div className="flex flex-col items-center shrink-0 pt-0.5">
+                                      <div className="text-[11px] font-bold text-gray-900 tabular-nums leading-none">{fmt(runningStart)}</div>
+                                      <div className="w-px h-4 bg-green-200 my-1"></div>
+                                      <div className="text-[10px] font-medium text-gray-500 tabular-nums leading-none">{fmt(runningEnd)}</div>
+                                    </div>
+                                    <div className="min-w-0 flex-1">
+                                      <div className="mb-1 flex items-start justify-between gap-2">
+                                        <div className="min-w-0">
+                                          <div className="flex items-center gap-2">
+                                            {runningOrder.pkg.toLowerCase() === 'bulk' ? (
+                                              <TruckIcon size={15} className="shrink-0 text-blue-500" />
+                                            ) : (
+                                              <Package size={15} className="shrink-0 text-orange-500" />
+                                            )}
+                                            <div className="truncate text-sm font-extrabold text-gray-900">{runningOrder.customer}</div>
+                                          </div>
+                                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-gray-500">
+                                            <span>{runningOrder.productionOrder ? `PO ${runningOrder.productionOrder}` : `#${runningOrder.num}`}</span>
+                                            <span className="text-gray-300">-</span>
+                                            <span>{runningOrder.recipe}</span>
+                                            <span className="text-gray-300">-</span>
+                                            <span>{ev(runningOrder).toFixed(1)} m3</span>
+                                            <span className="text-gray-300">-</span>
+                                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${getPkgBadgeClass(runningOrder)}`}>
+                                              {getPkgLabel(runningOrder)}
+                                            </span>
+                                          </div>
+                                        </div>
+                                        <span className="rounded-full bg-green-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-green-700">
+                                          Running
+                                        </span>
+                                      </div>
+                                      <div className="mt-2">
+                                        <div className="mb-1 flex items-center justify-between">
+                                          <span className="text-[9px] font-bold uppercase tracking-wider text-gray-400">Actieve order op operator dashboard</span>
+                                          <span className="text-[10px] font-bold text-gr tabular-nums">{Math.round(runningProgress)}%</span>
+                                        </div>
+                                        <div className="h-2 w-full overflow-hidden rounded-full bg-white">
+                                          <motion.div
+                                            className="h-full bg-gr"
+                                            initial={{ width: 0 }}
+                                            animate={{ width: `${runningProgress}%` }}
+                                          />
+                                        </div>
+                                      </div>
+                                      <div className="mt-2 grid grid-cols-3 gap-2 text-[10px]">
+                                        <div className="rounded-lg bg-white/80 px-2 py-1">
+                                          <div className="text-gray-400">Runtime</div>
+                                          <div className="font-bold text-gray-800">{runningEntry.duration.toFixed(1)} min</div>
+                                        </div>
+                                        <div className="rounded-lg bg-white/80 px-2 py-1">
+                                          <div className="text-gray-400">Volume</div>
+                                          <div className="font-bold text-gray-800">{ev(runningOrder).toFixed(1)} m3</div>
+                                        </div>
+                                        <div className="rounded-lg bg-white/80 px-2 py-1">
+                                          <div className="text-gray-400">Eindtijd</div>
+                                          <div className="font-bold text-gray-800">{fmt(runningEnd)}</div>
+                                        </div>
+                                      </div>
                                     </div>
                                   </div>
                                 </div>
