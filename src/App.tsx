@@ -3686,25 +3686,26 @@ export default function App() {
     const lid = prioritizedEntries[0].order.line;
     const orderedOrders = prioritizedEntries.map(entry => entry.order);
     const starts = getScheduledStartsForLine(orderedOrders, lid);
-    let cascadingShiftMs = 0;
+    let cursorEnd: Date | null = null;
 
     return prioritizedEntries.map((entry, index) => {
       const order = entry.order;
       const prevOrder = index > 0 ? orderedOrders[index - 1] : null;
-      const startTime = starts[index];
+      const scheduledStart = starts[index] || starts[0] || currentTime;
       const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
       const sw = swMats.length;
       const duration = rt(order, LINES[lid].speed);
       const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
-      const baseProdStart = new Date(startTime.getTime() + transitionMinutes * 60000);
-      const baseEndTime = new Date(baseProdStart.getTime() + duration * 60000);
-      let prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
+      let startTime = cursorEnd ? new Date(cursorEnd) : scheduledStart;
+      let prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
       const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
       if (heldLoadDateTime && prodStart.getTime() < heldLoadDateTime.getTime()) {
-        cascadingShiftMs += heldLoadDateTime.getTime() - prodStart.getTime();
-        prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
+        const shiftMs = heldLoadDateTime.getTime() - prodStart.getTime();
+        startTime = new Date(startTime.getTime() + shiftMs);
+        prodStart = new Date(prodStart.getTime() + shiftMs);
       }
-      const endTime = new Date(baseEndTime.getTime() + cascadingShiftMs);
+      const endTime = new Date(prodStart.getTime() + duration * 60000);
+      cursorEnd = endTime;
 
       return {
         ...entry,
@@ -3929,7 +3930,7 @@ export default function App() {
       const orderedOrders = prioritizedEntries.map(entry => entry.order);
       const starts = getScheduledStartsForLine(orderedOrders, lid);
 
-      let cascadingShiftMs = operatorRuntimeShiftMs;
+      let cursorEnd: Date | null = null;
       if (!displayedCurrentOrder && prioritizedEntries.length > 0) {
         const firstOrder = prioritizedEntries[0].order;
         const firstPrevOrder = null;
@@ -3938,30 +3939,31 @@ export default function App() {
         const firstBaseProdStart = new Date(firstStartTime.getTime() + firstTransitionMinutes * 60000);
         const nowTime = currentTime.getTime();
         if (firstBaseProdStart.getTime() < nowTime) {
-          cascadingShiftMs += nowTime - firstBaseProdStart.getTime();
+          cursorEnd = new Date(nowTime - firstTransitionMinutes * 60000);
         }
       }
       return prioritizedEntries.map((entry, index) => {
         const order = entry.order;
         const prevOrder = index > 0 ? orderedOrders[index - 1] : null;
-        const startTime = starts[index];
+        const scheduledStart = starts[index] || starts[0] || currentTime;
         const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
         const sw = swMats.length;
         const duration = rt(order, LINES[lid].speed);
         const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
-        const baseProdStart = new Date(startTime.getTime() + transitionMinutes * 60000);
-        const baseEndTime = new Date(baseProdStart.getTime() + duration * 60000);
-        let prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
+        let startTime = cursorEnd ? new Date(cursorEnd) : new Date(scheduledStart.getTime() + operatorRuntimeShiftMs);
+        let prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
         if (index === 0 && displayedCurrentOrder?.status === 'running' && displayedCurrentActualEnd && prodStart.getTime() < displayedCurrentActualEnd.getTime()) {
-          cascadingShiftMs += displayedCurrentActualEnd.getTime() - prodStart.getTime();
-          prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
+          prodStart = new Date(displayedCurrentActualEnd);
+          startTime = new Date(prodStart.getTime() - transitionMinutes * 60000);
         }
         const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
         if (heldLoadDateTime && prodStart.getTime() < heldLoadDateTime.getTime()) {
-          cascadingShiftMs += heldLoadDateTime.getTime() - prodStart.getTime();
-          prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
+          const shiftMs = heldLoadDateTime.getTime() - prodStart.getTime();
+          startTime = new Date(startTime.getTime() + shiftMs);
+          prodStart = new Date(prodStart.getTime() + shiftMs);
         }
-        const endTime = new Date(baseEndTime.getTime() + cascadingShiftMs);
+        const endTime = new Date(prodStart.getTime() + duration * 60000);
+        cursorEnd = endTime;
         let operatorState = getOperatorOrderState(order, index, nowMinutes);
         const loadDateTime = getOrderLoadReferenceDateTime(order, prodStart);
         if (
