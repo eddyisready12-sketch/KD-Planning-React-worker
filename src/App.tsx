@@ -3148,20 +3148,37 @@ export default function App() {
       lineIds.forEach(lid => {
           const lineOrders = lineOrdersByLine[lid];
           const starts = schedule[lid];
+          let cursorEnd: Date | null = null;
           res[lid] = lineOrders.map((order, index) => {
-            const startTime = starts[index];
+            const scheduledStart = starts[index] || starts[0] || currentTime;
             const prevOrder = index > 0 ? lineOrders[index - 1] : null;
             const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
             const sw = swMats.length;
             const duration = rt(order, LINES[lid].speed);
             const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
-            const prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
+            let startTime = cursorEnd ? new Date(cursorEnd) : scheduledStart;
+            let prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
+
+            const runningStart = getRunningOrderStart(order);
+            if (runningStart) {
+              prodStart = runningStart;
+              startTime = new Date(prodStart.getTime() - transitionMinutes * 60000);
+            }
+
+            const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
+            if (heldLoadDateTime && prodStart.getTime() < heldLoadDateTime.getTime()) {
+              const shiftMs = heldLoadDateTime.getTime() - prodStart.getTime();
+              startTime = new Date(startTime.getTime() + shiftMs);
+              prodStart = new Date(prodStart.getTime() + shiftMs);
+            }
+
             const endTime = new Date(prodStart.getTime() + duration * 60000);
+            cursorEnd = endTime;
             return { order, startTime, prodStart, endTime, swMats, sw, duration };
           });
       });
     return res;
-  }, [lineIds, lineOrdersByLine, schedule, bunkers, config, getTransitionMinutes]);
+  }, [lineIds, lineOrdersByLine, schedule, bunkers, config, currentTime, getTransitionMinutes]);
 
   const lineTimelineEntryByOrderId = useMemo(() => {
     const res: Record<LineId, Map<number, ScheduledLineEntry>> = { 1: new Map(), 2: new Map(), 3: new Map() };
