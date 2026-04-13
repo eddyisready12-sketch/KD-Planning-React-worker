@@ -3448,9 +3448,16 @@ export default function App() {
     const assignments = new Map<string, Bunker | null>();
     const usedBunkers = new Set<string>();
     const bulkComponents = order.components.filter(component => isBulkLikeOrderComponent(component, bunkerScope));
+    const componentKey = (component: Order['components'][number]) => `${component.name}|${component.code}`;
+    const isReservedForOtherComponent = (bunker: Bunker, component: Order['components'][number]) =>
+      bulkComponents.some(otherComponent =>
+        componentKey(otherComponent) !== componentKey(component) &&
+        isBunkerExactMatchForComponent(bunker, otherComponent) &&
+        !canUseExistingMaterialForRequested(bunker.m, bunker.mc, component.name, component.code)
+      );
 
     bulkComponents.forEach(component => {
-      const key = `${component.name}|${component.code}`;
+      const key = componentKey(component);
       const currentMatch = bunkerScope.find(b =>
         !usedBunkers.has(b.c) &&
         isBunkerExactMatchForComponent(b, component)
@@ -3469,17 +3476,17 @@ export default function App() {
     });
 
     bulkComponents.forEach(component => {
-      const key = `${component.name}|${component.code}`;
+      const key = componentKey(component);
       if (assignments.has(key)) return;
       const reusableAssignedBunker = Array.from(assignments.values()).find((bunker): bunker is Bunker =>
-        !!bunker && canBunkerServeOrderComponent(bunker, component)
+        !!bunker && canUseExistingMaterialForRequested(bunker.m, bunker.mc, component.name, component.code)
       );
       if (reusableAssignedBunker) {
         assignments.set(key, reusableAssignedBunker);
         return;
       }
       const possibleMatch = bunkerScope
-        .filter(b => !usedBunkers.has(b.c) && canBunkerServeOrderComponent(b, component))
+        .filter(b => !usedBunkers.has(b.c) && canBunkerServeOrderComponent(b, component) && !isReservedForOtherComponent(b, component))
         .sort((a, b) => {
           const emptyDiff = Number(isBunkerEffectivelyEmpty(b)) - Number(isBunkerEffectivelyEmpty(a));
           if (emptyDiff !== 0) return emptyDiff;
@@ -7392,16 +7399,23 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }
   const bunkerAssignments = useMemo(() => {
     const assignments = new Map<string, Bunker | null>();
     const usedBunkers = new Set<string>();
+    const componentKey = (component: Order['components'][number]) => `${component.name}|${component.code}`;
+    const isReservedForOtherComponent = (bunker: Bunker, component: Order['components'][number]) =>
+      bulkComponents.some(otherComponent =>
+        componentKey(otherComponent) !== componentKey(component) &&
+        isBunkerExactMatchForComponent(bunker, otherComponent) &&
+        !canUseExistingMaterialForRequested(bunker.m, bunker.mc, component.name, component.code)
+      );
 
     // 1. Prioritize bunkers that ALREADY contain the material (Match by name or code)
     bulkComponents.forEach(c => {
-      const key = `${c.name}|${c.code}`;
+      const key = componentKey(c);
       const currentMatch = lineBunkers.find(b =>
         !usedBunkers.has(b.c) &&
         isBunkerExactMatchForComponent(b, c)
       );
       if (currentMatch) {
-        assignments.set(`${c.name}|${c.code}`, currentMatch);
+        assignments.set(key, currentMatch);
         usedBunkers.add(currentMatch.c);
         return;
       }
@@ -7415,10 +7429,10 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }
 
     // 2. Match remaining components to bunkers that CAN contain the material (from calibration sheet)
     bulkComponents.forEach(c => {
-      const key = `${c.name}|${c.code}`;
+      const key = componentKey(c);
       if (assignments.has(key)) return;
       const reusableAssignedBunker = Array.from(assignments.values()).find((bunker): bunker is Bunker =>
-        !!bunker && canBunkerServeOrderComponent(bunker, c)
+        !!bunker && canUseExistingMaterialForRequested(bunker.m, bunker.mc, c.name, c.code)
       );
       if (reusableAssignedBunker) {
         assignments.set(key, reusableAssignedBunker);
@@ -7427,7 +7441,8 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }
 
       const possibleMatch = lineBunkers
         .filter(b => 
-          !usedBunkers.has(b.c) && (
+          !usedBunkers.has(b.c) &&
+          !isReservedForOtherComponent(b, c) && (
             (b.ms && b.ms.some(m => canUseExistingMaterialForRequested(m, null, c.name, c.code))) ||
             (b.materialData && Object.entries(b.materialData).some(([mName, mData]) => 
               canUseExistingMaterialForRequested(mName, mData.code, c.name, c.code)
