@@ -5613,7 +5613,14 @@ export default function App() {
                                                 </div>
                                               <div className="text-sm font-bold truncate text-gray-800">{o.customer}</div>
                                             </div>
-                                              <div className="text-[10px] font-bold text-gray-400 tabular-nums shrink-0">{o.productionOrder ? `PO ${o.productionOrder}` : `#${o.num}`}</div>
+                                              <div className="flex items-center gap-2 shrink-0">
+                                                {isRunning && (
+                                                  <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-green-700">
+                                                    Running
+                                                  </span>
+                                                )}
+                                                <div className="text-[10px] font-bold text-gray-400 tabular-nums shrink-0">{o.productionOrder ? `PO ${o.productionOrder}` : `#${o.num}`}</div>
+                                              </div>
                                             </div>
                                             <div className="text-[11px] text-gray-500 font-medium mb-2 flex items-center gap-1.5 flex-wrap">
                                               <span className="cursor-pointer hover:text-blue-600 hover:underline truncate max-w-[180px]" onClick={() => setSelectedOrderForDetail(o)} title={o.recipe}>{o.recipe}</span>
@@ -5641,7 +5648,7 @@ export default function App() {
                                             {isRunning && (
                                               <div className="mb-2">
                                                 <div className="flex items-center justify-between mb-1">
-                                                  <span className="text-[9px] font-bold text-gr uppercase">Productie bezig...</span>
+                                                  <span className="text-[9px] font-bold text-gr uppercase">Running op operator dashboard</span>
                                                   <span className="text-[9px] font-bold text-gr tabular-nums">{Math.round(orderProgress)}%</span>
                                                 </div>
                                                 <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden">
