@@ -5459,10 +5459,9 @@ export default function App() {
                                 const s = plannerSearch.toLowerCase();
                                 return o.customer.toLowerCase().includes(s) || o.num.includes(s) || o.recipe.toLowerCase().includes(s);
                               });
-                            const plannerDisplayTimeline = filteredPlannerDisplayEntriesByLine[lid].filter(entry => {
+                            const plannerDisplayTimelineCandidates = filteredPlannerDisplayEntriesByLine[lid].filter(entry => {
                               const o = entry.order;
                               const s = plannerSearch.toLowerCase();
-                              if (o.status === 'running') return false;
                               return o.customer.toLowerCase().includes(s) || o.num.includes(s) || o.recipe.toLowerCase().includes(s);
                             });
                             const runningEntry = lineTimelineByLine[lid].find(entry => entry.order.status === 'running') || null;
@@ -5478,15 +5477,24 @@ export default function App() {
                               : 0;
                             const lineTimelineIndexByOrderId = new Map(lineTimelineByLine[lid].map((entry, index) => [entry.order.id, index]));
                             const runningIndex = runningEntry ? (lineTimelineIndexByOrderId.get(runningEntry.order.id) ?? -1) : -1;
-                            const runningShiftMs = runningEntry && runningStart
-                              ? runningStart.getTime() - runningEntry.prodStart.getTime()
+                            const plannerDisplayTimeline = plannerDisplayTimelineCandidates.filter(entry => {
+                              if (entry.order.status === 'running') return false;
+                              if (runningIndex < 0) return true;
+                              const entryIndex = lineTimelineIndexByOrderId.get(entry.order.id) ?? -1;
+                              return entryIndex > runningIndex;
+                            });
+                            const firstEntryAfterRunning = runningIndex >= 0
+                              ? lineTimelineByLine[lid].find((entry, index) => index > runningIndex && entry.order.status !== 'running') || null
+                              : null;
+                            const runningFollowShiftMs = runningEnd && firstEntryAfterRunning && runningOrder
+                              ? (runningEnd.getTime() + getTransitionMinutes(lid, runningOrder, firstEntryAfterRunning.order) * 60000) - firstEntryAfterRunning.prodStart.getTime()
                               : 0;
                             const getPlannerLineDisplayStart = (entry: ScheduledLineEntry) => {
                               const entryRunningStart = getRunningOrderStart(entry.order);
                               if (entryRunningStart) return entryRunningStart;
                               const entryIndex = lineTimelineIndexByOrderId.get(entry.order.id) ?? -1;
-                              if (runningIndex >= 0 && entryIndex > runningIndex && runningShiftMs !== 0) {
-                                return new Date(entry.prodStart.getTime() + runningShiftMs);
+                              if (runningIndex >= 0 && entryIndex > runningIndex && runningFollowShiftMs !== 0) {
+                                return new Date(entry.prodStart.getTime() + runningFollowShiftMs);
                               }
                               return entry.prodStart;
                             };
