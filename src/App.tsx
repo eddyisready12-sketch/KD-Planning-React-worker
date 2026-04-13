@@ -107,7 +107,7 @@ function getPkgLabel(order: Pick<Order, 'pkg'>): string {
 function getPkgBadgeClass(order: Pick<Order, 'pkg'>): string {
   const pkg = normalizePkg(order.pkg);
   if (pkg === 'bulk') return 'bg-blue-50 text-blue-600';
-  if (pkg === 'bag') return 'bg-red-50 text-red-700';
+  if (pkg === 'bag') return 'bg-purple-100 text-purple-800';
   if (pkg === 'bale') return 'bg-orange-50 text-orange-600';
   return 'bg-gray-100 text-gray-600';
 }
