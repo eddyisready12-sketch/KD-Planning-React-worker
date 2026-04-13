@@ -133,6 +133,12 @@ function parseLocalDate(value?: string | null): Date | null {
   return parsed;
 }
 
+function getRunningOrderStart(order: Pick<Order, 'status' | 'startedAt'>): Date | null {
+  if (order.status !== 'running' || !order.startedAt) return null;
+  const parsed = new Date(order.startedAt);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function formatPlannerDateHeading(date: Date): string {
   return date.toLocaleDateString('nl-NL', {
     weekday: 'long',
@@ -3678,11 +3684,17 @@ export default function App() {
     }
   }, [plannerVisibleDates, plannerSelectedDate, currentTime]);
 
-  const filteredPlannerDisplayEntriesByLine = useMemo(() => ({
-    1: plannerDisplayEntriesByLine[1].filter(entry => formatLocalDate(entry.prodStart) === plannerSelectedDate),
-    2: plannerDisplayEntriesByLine[2].filter(entry => formatLocalDate(entry.prodStart) === plannerSelectedDate),
-    3: plannerDisplayEntriesByLine[3].filter(entry => formatLocalDate(entry.prodStart) === plannerSelectedDate)
-  }), [plannerDisplayEntriesByLine, plannerSelectedDate]);
+  const filteredPlannerDisplayEntriesByLine = useMemo(() => {
+    const isVisibleOnSelectedDate = (entry: ScheduledLineEntry) => {
+      const runningStart = getRunningOrderStart(entry.order);
+      return formatLocalDate(runningStart || entry.prodStart) === plannerSelectedDate;
+    };
+    return {
+      1: plannerDisplayEntriesByLine[1].filter(isVisibleOnSelectedDate),
+      2: plannerDisplayEntriesByLine[2].filter(isVisibleOnSelectedDate),
+      3: plannerDisplayEntriesByLine[3].filter(isVisibleOnSelectedDate)
+    };
+  }, [plannerDisplayEntriesByLine, plannerSelectedDate]);
 
   const plannerDisplayIndexByLine = useMemo(() => ({
     1: new Map(filteredPlannerDisplayEntriesByLine[1].map((entry, index) => [entry.order.id, index])),
@@ -5549,17 +5561,22 @@ export default function App() {
                                   const o = entry.order;
                                   const { prodStart, endTime, swMats, sw, duration } = entry;
                                   const isRunning = o.status === 'running';
+                                  const runningStart = getRunningOrderStart(o);
+                                  const displayProdStart = runningStart || prodStart;
+                                  const displayEndTime = runningStart
+                                    ? new Date(displayProdStart.getTime() + duration * 60000)
+                                    : endTime;
                                   const previousEntry = i > 0 ? plannerDisplayTimeline[i - 1] : null;
                                   const plannerState = entry.plannerState;
-                                  const dateKey = formatLocalDate(prodStart);
-                                  const previousDateKey = previousEntry ? formatLocalDate(previousEntry.prodStart) : null;
+                                  const dateKey = formatLocalDate(displayProdStart);
+                                  const previousDateKey = previousEntry ? formatLocalDate(getRunningOrderStart(previousEntry.order) || previousEntry.prodStart) : null;
                                   const showDateHeading = i === 0 || previousDateKey !== dateKey;
 
                                   // Real-time progress calculation
                                   let orderProgress = 0;
                                   if (isRunning) {
                                     const total = duration * 60000;
-                                    const elapsed = currentTime.getTime() - prodStart.getTime();
+                                    const elapsed = currentTime.getTime() - displayProdStart.getTime();
                                     orderProgress = Math.max(0, Math.min(99, (elapsed / total) * 100));
                                   }
 
@@ -5596,9 +5613,9 @@ export default function App() {
                                       <div className={`p-4 flex flex-col gap-2 transition-colors ${isRunning ? 'bg-grl/20 border-l-4 border-gr' : 'hover:bg-gray-50'}`}>
                                         <div className="flex items-start gap-3">
                                           <div className="flex flex-col items-center shrink-0 pt-0.5">
-                                            <div className="text-[11px] font-bold text-gray-800 tabular-nums leading-none">{fmt(prodStart)}</div>
+                                            <div className="text-[11px] font-bold text-gray-800 tabular-nums leading-none">{fmt(displayProdStart)}</div>
                                             <div className="w-px h-4 bg-gray-200 my-1"></div>
-                                            <div className="text-[10px] font-medium text-gray-400 tabular-nums leading-none">{fmt(endTime)}</div>
+                                            <div className="text-[10px] font-medium text-gray-400 tabular-nums leading-none">{fmt(displayEndTime)}</div>
                                           </div>
 
                                           <div className="flex-1 min-w-0">
