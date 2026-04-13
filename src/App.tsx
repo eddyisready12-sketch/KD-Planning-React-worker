@@ -104,6 +104,14 @@ function getPkgLabel(order: Pick<Order, 'pkg'>): string {
   return pkg === 'bulk' ? 'BULK / M3' : pkg === 'bag' ? 'BAG' : pkg === 'bale' ? 'BAL' : 'PKG';
 }
 
+function getPkgBadgeClass(order: Pick<Order, 'pkg'>): string {
+  const pkg = normalizePkg(order.pkg);
+  if (pkg === 'bulk') return 'bg-blue-50 text-blue-600';
+  if (pkg === 'bag') return 'bg-red-50 text-red-700';
+  if (pkg === 'bale') return 'bg-orange-50 text-orange-600';
+  return 'bg-gray-100 text-gray-600';
+}
+
 function getOrderVolumeFactor(order: Pick<Order, 'vol' | 'pkg'>): number {
   return order.vol > 0 ? (ev(order as Order) / order.vol) : 1;
 }
@@ -4004,6 +4012,7 @@ export default function App() {
         volume: ev(order).toFixed(1),
         pkg: order.pkg.toUpperCase(),
         pkgLabel: getPkgLabel(order),
+        pkgBadgeClass: getPkgBadgeClass(order),
         factor: getOrderVolumeFactor(order).toFixed(2),
         isBulk: order.pkg.toLowerCase() === 'bulk'
       };
@@ -4277,16 +4286,26 @@ export default function App() {
 
   const handleStartOrder = async (id: number) => {
     const target = orders.find(o => o.id === id);
+    if (!target) return;
     const startedAt = new Date().toISOString();
-    const nextOrders = orders.map(o => o.id === id ? { ...o, status: 'running', startedAt } : o);
-    await persistOrders(nextOrders, 'Start sync mislukt', target?.line ?? null, target?.num ?? null);
+    const updatedOrder: Order = { ...target, status: 'running', startedAt };
+    const nextOrders = orders.map(o => o.id === id ? updatedOrder : o);
+    await persistSingleOrder(updatedOrder, nextOrders, 'Start sync mislukt');
     setProgress(0);
   };
 
   const handleFinishOrder = async (id: number) => {
     const target = orders.find(o => o.id === id);
-    const nextOrders = orders.map(o => o.id === id ? { ...o, status: 'completed' } : o);
-    await persistOrders(nextOrders, 'Voltooid sync mislukt', target?.line ?? null, target?.num ?? null);
+    if (!target) return;
+    const updatedOrder: Order = {
+      ...target,
+      status: 'completed',
+      arrived: false,
+      arrivedTime: undefined,
+      holdLoadTime: false
+    };
+    const nextOrders = orders.map(o => o.id === id ? updatedOrder : o);
+    await persistSingleOrder(updatedOrder, nextOrders, 'Voltooid sync mislukt');
   };
 
   const handleAssignDriverToOrder = async (orderId: number, driverName: string) => {
@@ -4692,7 +4711,7 @@ export default function App() {
                           <div className="min-w-0">
                             <div className="text-sm font-bold text-gray-800 truncate">{card.customer}</div>
                             <div className="mt-1 flex items-center gap-2 text-[10px] text-gray-500 font-medium flex-wrap">
-                              <span className={`rounded-full px-2 py-0.5 font-bold uppercase tracking-wide ${card.isBulk ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600'}`}>
+                              <span className={`rounded-full px-2 py-0.5 font-bold uppercase tracking-wide ${card.pkgBadgeClass}`}>
                                 {card.pkgLabel}
                               </span>
                               <span className="text-gray-300">-</span>
@@ -4901,7 +4920,7 @@ export default function App() {
                                 <span className="font-medium">{o.recipe}</span> - {ev(o).toFixed(1)} m3 - {formatOperatorDateTimeRange(entry.prodStart, entry.endTime, currentTime)}
                               </div>
                               <div className="mt-1 flex items-center gap-2 flex-wrap text-[10px] font-medium text-gray-500">
-                                <span className={`rounded-full px-2 py-0.5 font-bold uppercase tracking-wide ${o.pkg === 'bulk' ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600'}`}>
+                                <span className={`rounded-full px-2 py-0.5 font-bold uppercase tracking-wide ${getPkgBadgeClass(o)}`}>
                                   {getPkgLabel(o)}
                                 </span>
                                 <span className="text-gray-300">-</span>
@@ -5601,7 +5620,7 @@ export default function App() {
                                               <span className="text-gray-300">-</span>
                                               <span className="tabular-nums">{ev(o).toFixed(1)} m3</span>
                                               <span className="text-gray-300">-</span>
-                                              <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${o.pkg === 'bulk' ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600'}`}>
+                                              <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${getPkgBadgeClass(o)}`}>
                                                 {getPkgLabel(o)}
                                               </span>
                                               <span className="text-gray-300">-</span>
@@ -5750,7 +5769,7 @@ export default function App() {
                                         <div className="min-w-0">
                                           <div className="truncate">{o.customer}</div>
                                           <div className="mt-0.5 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide">
-                                            <span className={`rounded-full px-2 py-0.5 ${o.pkg === 'bulk' ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600'}`}>
+                                            <span className={`rounded-full px-2 py-0.5 ${getPkgBadgeClass(o)}`}>
                                               {getPkgLabel(o)}
                                             </span>
                                           </div>
@@ -5857,7 +5876,7 @@ export default function App() {
                                         <div className="min-w-0">
                                           <div className="truncate">{o.customer}</div>
                                           <div className="mt-0.5 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide">
-                                            <span className={`rounded-full px-2 py-0.5 ${o.pkg === 'bulk' ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600'}`}>
+                                            <span className={`rounded-full px-2 py-0.5 ${getPkgBadgeClass(o)}`}>
                                               {getPkgLabel(o)}
                                             </span>
                                             <span className="text-gray-300">-</span>
