@@ -5610,7 +5610,7 @@ export default function App() {
                                         </div>
                                       )}
                                       
-                                      <div className={`p-4 flex flex-col gap-2 transition-colors ${isRunning ? 'bg-grl/20 border-l-4 border-gr' : 'hover:bg-gray-50'}`}>
+                                      <div className={`p-4 flex flex-col gap-2 transition-colors ${isRunning ? 'bg-green-50/60 border-l-4 border-gr shadow-inner' : 'hover:bg-gray-50'}`}>
                                         <div className="flex items-start gap-3">
                                           <div className="flex flex-col items-center shrink-0 pt-0.5">
                                             <div className="text-[11px] font-bold text-gray-800 tabular-nums leading-none">{fmt(displayProdStart)}</div>
@@ -5663,17 +5663,36 @@ export default function App() {
                                             )}
 
                                             {isRunning && (
-                                              <div className="mb-2">
+                                              <div className="mb-2 rounded-xl border border-green-200 bg-white/90 p-3 shadow-sm">
                                                 <div className="flex items-center justify-between mb-1">
-                                                  <span className="text-[9px] font-bold text-gr uppercase">Running op operator dashboard</span>
-                                                  <span className="text-[9px] font-bold text-gr tabular-nums">{Math.round(orderProgress)}%</span>
+                                                  <div className="flex items-center gap-2">
+                                                    <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">Actieve order</span>
+                                                    <span className="rounded-full bg-green-100 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-green-700">
+                                                      Running
+                                                    </span>
+                                                  </div>
+                                                  <span className="text-[10px] font-bold text-gr tabular-nums">{Math.round(orderProgress)}%</span>
                                                 </div>
-                                                <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden">
+                                                <div className="h-2 w-full bg-gray-100 rounded-full overflow-hidden">
                                                   <motion.div 
                                                     className="h-full bg-gr" 
                                                     initial={{ width: 0 }}
                                                     animate={{ width: `${orderProgress}%` }}
                                                   />
+                                                </div>
+                                                <div className="mt-2 grid grid-cols-3 gap-2 text-[10px]">
+                                                  <div className="rounded-lg bg-gray-50 px-2 py-1">
+                                                    <div className="text-gray-400">Runtime</div>
+                                                    <div className="font-bold text-gray-800">{duration.toFixed(1)} min</div>
+                                                  </div>
+                                                  <div className="rounded-lg bg-gray-50 px-2 py-1">
+                                                    <div className="text-gray-400">Volume</div>
+                                                    <div className="font-bold text-gray-800">{ev(o).toFixed(1)} m3</div>
+                                                  </div>
+                                                  <div className="rounded-lg bg-gray-50 px-2 py-1">
+                                                    <div className="text-gray-400">Eindtijd</div>
+                                                    <div className="font-bold text-gray-800">{fmt(displayEndTime)}</div>
+                                                  </div>
                                                 </div>
                                               </div>
                                             )}
