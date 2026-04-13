@@ -139,17 +139,25 @@ function getRunningOrderStart(order: Pick<Order, 'status' | 'startedAt'>): Date 
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+function getOrderLoadReferenceDateTime(
+  order: Pick<Order, 'status' | 'arrivedTime' | 'eta'>,
+  baseDate: Date
+): Date | null {
+  const loadTime = normalizeEta(order.status === 'arrived' ? (order.arrivedTime || order.eta) : order.eta);
+  const loadMinutes = etaToMins(loadTime);
+  if (loadMinutes === null) return null;
+  const result = new Date(baseDate);
+  const clockMinutes = loadMinutes + (5 * 60);
+  result.setHours(Math.floor(clockMinutes / 60), clockMinutes % 60, 0, 0);
+  return result;
+}
+
 function getHeldLoadDateTime(
   order: Pick<Order, 'status' | 'holdLoadTime' | 'arrivedTime' | 'eta'>,
   baseDate: Date
 ): Date | null {
   if (order.status !== 'arrived' || !order.holdLoadTime) return null;
-  const loadTime = normalizeEta(order.arrivedTime || order.eta);
-  const loadMinutes = etaToMins(loadTime);
-  if (loadMinutes === null) return null;
-  const result = new Date(baseDate);
-  result.setHours(Math.floor(loadMinutes / 60), loadMinutes % 60, 0, 0);
-  return result;
+  return getOrderLoadReferenceDateTime(order, baseDate);
 }
 
 function formatPlannerDateHeading(date: Date): string {
@@ -3937,6 +3945,21 @@ export default function App() {
           prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
         }
         const endTime = new Date(baseEndTime.getTime() + cascadingShiftMs);
+        let operatorState = getOperatorOrderState(order, index, nowMinutes);
+        const loadDateTime = getOrderLoadReferenceDateTime(order, prodStart);
+        if (
+          operatorState.key === 'direct' &&
+          normalizePkg(order.pkg) === 'bulk' &&
+          loadDateTime &&
+          currentTime.getTime() < loadDateTime.getTime()
+        ) {
+          operatorState = {
+            label: 'Wachten',
+            cls: 'bg-blue-100 text-blue-700',
+            reason: `Wacht tot laadtijd ${fmt(loadDateTime)}`,
+            key: 'wait'
+          };
+        }
 
         return {
           ...entry,
@@ -3946,7 +3969,7 @@ export default function App() {
           swMats,
           sw,
           duration,
-          operatorState: getOperatorOrderState(order, index, nowMinutes)
+          operatorState
         };
       });
     }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getLoadHoldSequenceRank, getEffectivePriority]);
