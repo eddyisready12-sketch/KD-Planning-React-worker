@@ -139,6 +139,19 @@ function getRunningOrderStart(order: Pick<Order, 'status' | 'startedAt'>): Date 
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+function getHeldLoadDateTime(
+  order: Pick<Order, 'status' | 'holdLoadTime' | 'arrivedTime' | 'eta'>,
+  baseDate: Date
+): Date | null {
+  if (order.status !== 'arrived' || !order.holdLoadTime) return null;
+  const loadTime = normalizeEta(order.arrivedTime || order.eta);
+  const loadMinutes = etaToMins(loadTime);
+  if (loadMinutes === null) return null;
+  const result = new Date(baseDate);
+  result.setHours(Math.floor(loadMinutes / 60), loadMinutes % 60, 0, 0);
+  return result;
+}
+
 function formatPlannerDateHeading(date: Date): string {
   return date.toLocaleDateString('nl-NL', {
     weekday: 'long',
@@ -3521,6 +3534,7 @@ export default function App() {
     const pkg = normalizePkg(order.pkg);
     const missingBulkLoadTime = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && !normalizedEta;
     const waitsForBulk = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes - 30;
+    const waitsForHeldLoadTime = order.status === 'arrived' && !!order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes;
     const orderLineBunkers = bunkers[order.line] || lineBunkers;
     const needsRecipeBunkerPrep = !isOrderDirectlyRunnable(order, orderLineBunkers);
     const needsCleaning = index === 0 && hasProlineCleaningTrigger(order);
@@ -3537,6 +3551,9 @@ export default function App() {
           : `Wacht op ${lineIssue.soort === 'storing' ? 'storing' : 'onderhoud'}`,
         key: 'wait'
       };
+    }
+    if (waitsForHeldLoadTime) {
+      return { label: 'Wachten', cls: 'bg-blue-100 text-blue-700', reason: `Wacht tot laadtijd ${normalizedEta}`, key: 'wait' };
     }
     if (needsPrep) {
       return {
@@ -3570,6 +3587,7 @@ export default function App() {
     const pkg = normalizePkg(order.pkg);
     const missingBulkLoadTime = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && !normalizedEta;
     const waitsForBulk = bulkRequiresLoadTime && pkg === 'bulk' && !order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes - 30;
+    const waitsForHeldLoadTime = order.status === 'arrived' && !!order.holdLoadTime && etaMinutes !== null && nowMinutes < etaMinutes;
     const orderLineBunkers = bunkers[order.line] || lineBunkers;
     const needsRecipeBunkerPrep = !isOrderDirectlyRunnable(order, orderLineBunkers);
     const bunkerPrepReason = getOrderBunkerPrepReason(order, orderLineBunkers);
@@ -3585,6 +3603,9 @@ export default function App() {
           : `Wacht op ${lineIssue.soort === 'storing' ? 'storing' : 'onderhoud'}`,
         key: 'wait'
       };
+    }
+    if (waitsForHeldLoadTime) {
+      return { label: 'Wachten', cls: 'bg-blue-100 text-blue-700', reason: `Wacht tot laadtijd ${normalizedEta}`, key: 'wait' };
     }
     if (needsRecipeBunkerPrep) {
       return {
@@ -3630,6 +3651,7 @@ export default function App() {
     const lid = prioritizedEntries[0].order.line;
     const orderedOrders = prioritizedEntries.map(entry => entry.order);
     const starts = getScheduledStartsForLine(orderedOrders, lid);
+    let cascadingShiftMs = 0;
 
     return prioritizedEntries.map((entry, index) => {
       const order = entry.order;
@@ -3639,8 +3661,15 @@ export default function App() {
       const sw = swMats.length;
       const duration = rt(order, LINES[lid].speed);
       const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
-      const prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
-      const endTime = new Date(prodStart.getTime() + duration * 60000);
+      const baseProdStart = new Date(startTime.getTime() + transitionMinutes * 60000);
+      const baseEndTime = new Date(baseProdStart.getTime() + duration * 60000);
+      let prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
+      const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
+      if (heldLoadDateTime && prodStart.getTime() < heldLoadDateTime.getTime()) {
+        cascadingShiftMs += heldLoadDateTime.getTime() - prodStart.getTime();
+        prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
+      }
+      const endTime = new Date(baseEndTime.getTime() + cascadingShiftMs);
 
       return {
         ...entry,
@@ -3890,6 +3919,11 @@ export default function App() {
         let prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
         if (index === 0 && displayedCurrentOrder?.status === 'running' && displayedCurrentActualEnd && prodStart.getTime() < displayedCurrentActualEnd.getTime()) {
           cascadingShiftMs += displayedCurrentActualEnd.getTime() - prodStart.getTime();
+          prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
+        }
+        const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
+        if (heldLoadDateTime && prodStart.getTime() < heldLoadDateTime.getTime()) {
+          cascadingShiftMs += heldLoadDateTime.getTime() - prodStart.getTime();
           prodStart = new Date(baseProdStart.getTime() + cascadingShiftMs);
         }
         const endTime = new Date(baseEndTime.getTime() + cascadingShiftMs);
@@ -5483,22 +5517,30 @@ export default function App() {
                               const entryIndex = lineTimelineIndexByOrderId.get(entry.order.id) ?? -1;
                               return entryIndex > runningIndex;
                             });
-                            const firstEntryAfterRunning = runningIndex >= 0
-                              ? lineTimelineByLine[lid].find((entry, index) => index > runningIndex && entry.order.status !== 'running') || null
-                              : null;
-                            const runningFollowShiftMs = runningEnd && firstEntryAfterRunning && runningOrder
-                              ? (runningEnd.getTime() + getTransitionMinutes(lid, runningOrder, firstEntryAfterRunning.order) * 60000) - firstEntryAfterRunning.prodStart.getTime()
-                              : 0;
+                            const plannerLineDisplayTimesByOrderId = new Map<number, { start: Date; end: Date }>();
+                            if (runningEnd && runningOrder && runningIndex >= 0) {
+                              let cursor = runningEnd;
+                              let previousOrder: Order | null = runningOrder;
+                              plannerDisplayTimeline.forEach(entry => {
+                                const transitionMinutes = getTransitionMinutes(lid, previousOrder, entry.order);
+                                let start = new Date(cursor.getTime() + transitionMinutes * 60000);
+                                const heldLoadDateTime = getHeldLoadDateTime(entry.order, start);
+                                if (heldLoadDateTime && start.getTime() < heldLoadDateTime.getTime()) {
+                                  start = heldLoadDateTime;
+                                }
+                                const end = new Date(start.getTime() + entry.duration * 60000);
+                                plannerLineDisplayTimesByOrderId.set(entry.order.id, { start, end });
+                                cursor = end;
+                                previousOrder = entry.order;
+                              });
+                            }
                             const getPlannerLineDisplayStart = (entry: ScheduledLineEntry) => {
                               const entryRunningStart = getRunningOrderStart(entry.order);
                               if (entryRunningStart) return entryRunningStart;
-                              const entryIndex = lineTimelineIndexByOrderId.get(entry.order.id) ?? -1;
-                              if (runningIndex >= 0 && entryIndex > runningIndex && runningFollowShiftMs !== 0) {
-                                return new Date(entry.prodStart.getTime() + runningFollowShiftMs);
-                              }
-                              return entry.prodStart;
+                              return plannerLineDisplayTimesByOrderId.get(entry.order.id)?.start || entry.prodStart;
                             };
                             const getPlannerLineDisplayEnd = (entry: ScheduledLineEntry) =>
+                              plannerLineDisplayTimesByOrderId.get(entry.order.id)?.end ||
                               new Date(getPlannerLineDisplayStart(entry).getTime() + entry.duration * 60000);
                             
                               const lineIssue = storingen[lid];
