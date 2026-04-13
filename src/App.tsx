@@ -3556,6 +3556,119 @@ export default function App() {
     return `${bunker.c} -> ${firstMismatch.name}`;
   };
 
+  const getLineMoveBlockers = (order: Order, targetLine: LineId) => {
+    const sourceBunkers = bunkers[order.line] || [];
+    const targetBunkers = bunkers[targetLine] || [];
+    const blockers = new Map<string, Order['components'][number]>();
+
+    order.components
+      .filter(component => {
+        const unit = (component.unit || '').trim().toUpperCase();
+        return (
+          unit === 'M3' ||
+          unit === 'PERC' ||
+          unit === '%' ||
+          unit === '' ||
+          isBulkLikeOrderComponent(component, sourceBunkers) ||
+          isBulkLikeOrderComponent(component, targetBunkers)
+        );
+      })
+      .forEach(component => {
+        const canRunOnTarget = targetBunkers.some(bunker =>
+          isBunkerReadyForComponent(bunker, component) || canBunkerServeOrderComponent(bunker, component)
+        );
+        if (!canRunOnTarget) {
+          blockers.set(`${component.name}|${component.code}`, component);
+        }
+      });
+
+    return Array.from(blockers.values());
+  };
+
+  const handleMoveOrderToLine = async (orderId: number, targetLine: LineId) => {
+    const target = orders.find(order => order.id === orderId);
+    if (!target || target.line === targetLine) return;
+    if (target.status === 'running' || target.status === 'completed') {
+      setNotifications(prev => [{
+        id: Date.now(),
+        type: 'fout',
+        icon: 'LOCK',
+        titel: 'Verplaatsen niet mogelijk',
+        tekst: 'Een running of voltooide order kan niet naar een andere lijn.',
+        lijn: target.line,
+        orderNum: target.num,
+        tijd: new Date(),
+        gelezen: false
+      }, ...prev]);
+      return;
+    }
+
+    const blockers = getLineMoveBlockers(target, targetLine);
+    if (blockers.length > 0) {
+      setNotifications(prev => [{
+        id: Date.now(),
+        type: 'fout',
+        icon: 'WARN',
+        titel: `ML${targetLine} mist kalibratie`,
+        tekst: blockers.map(component => `${component.name}${component.code ? ` (${component.code})` : ''}`).join(', '),
+        lijn: target.line,
+        orderNum: target.num,
+        tijd: new Date(),
+        gelezen: false
+      }, ...prev]);
+      return;
+    }
+
+    const updatedOrder: Order = { ...target, line: targetLine };
+    const nextOrders = orders.map(order => order.id === orderId ? updatedOrder : order);
+    const basePlan: Record<LineId, number[]> = plannedOrderIdsByLine || {
+      1: lineOrdersByLine[1].map(order => order.id),
+      2: lineOrdersByLine[2].map(order => order.id),
+      3: lineOrdersByLine[3].map(order => order.id)
+    };
+    const nextPlan: Record<LineId, number[]> = {
+      1: basePlan[1].filter(id => id !== orderId),
+      2: basePlan[2].filter(id => id !== orderId),
+      3: basePlan[3].filter(id => id !== orderId)
+    };
+    nextPlan[targetLine] = [...nextPlan[targetLine], orderId];
+
+    setOrders(nextOrders);
+    setPlannedOrderIdsByLine(nextPlan);
+    setSelectedOrderForDetail(prev => prev?.id === orderId ? updatedOrder : prev);
+
+    try {
+      if (isSupabaseConfigured()) {
+        await writeOrdersToSupabase([updatedOrder]);
+        await writePlannedOrderIdsToSupabase(nextPlan);
+      }
+      setNotifications(prev => [{
+        id: Date.now(),
+        type: 'ok',
+        icon: 'OK',
+        titel: 'Order verplaatst',
+        tekst: `${target.customer} naar ML${targetLine}.`,
+        lijn: targetLine,
+        orderNum: target.num,
+        tijd: new Date(),
+        gelezen: false
+      }, ...prev]);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Opslaan naar Supabase mislukt';
+      setNotifications(prev => [{
+        id: Date.now(),
+        type: 'fout',
+        icon: 'ERR',
+        titel: 'Order verplaatsen sync mislukt',
+        tekst: errorMsg,
+        lijn: targetLine,
+        orderNum: target.num,
+        tijd: new Date(),
+        gelezen: false
+      }, ...prev]);
+    }
+  };
+
   const getOperatorOrderState = (
     order: Order,
     index: number,
@@ -7366,6 +7479,8 @@ export default function App() {
               lineBunkers={bunkers[selectedOrderForDetail.line]}
               lineConfig={config[selectedOrderForDetail.line]}
               lineSpeed={LINES[selectedOrderForDetail.line].speed}
+              getLineMoveBlockers={(targetLine) => getLineMoveBlockers(selectedOrderForDetail, targetLine)}
+              onMoveOrderToLine={(targetLine) => handleMoveOrderToLine(selectedOrderForDetail.id, targetLine)}
             />
           )}
         </AnimatePresence>
@@ -7374,12 +7489,14 @@ export default function App() {
   );
 }
 
-function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }: { 
+function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed, getLineMoveBlockers, onMoveOrderToLine }: { 
   order: Order; 
   onClose: () => void; 
   lineBunkers: Bunker[];
   lineConfig: AppConfig;
   lineSpeed: number;
+  getLineMoveBlockers: (targetLine: LineId) => Order['components'];
+  onMoveOrderToLine: (targetLine: LineId) => void;
 }) {
   const volume = order.vol || 0;
   const effectiveVolume = ev(order);
@@ -7522,6 +7639,13 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }
       .filter(Boolean) as string[];
   }, [bulkComponents, bunkerAssignments]);
 
+  const lineMoveOptions = ([1, 2, 3] as LineId[]).map(line => ({
+    line,
+    blockers: getLineMoveBlockers(line),
+    isCurrent: line === order.line,
+    isLocked: order.status === 'running' || order.status === 'completed'
+  }));
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={onClose}>
       <motion.div 
@@ -7543,6 +7667,44 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed }
             <h2 className="text-2xl font-bold text-gray-900">{order.customer}</h2>
             <div className="text-sm text-gray-500 mt-1">
               {getOrderRefLabel(order)} - Rit {order.rit} - Recept {order.recipe}
+            </div>
+            <div className="mt-4 rounded-xl border border-gray-100 bg-gray-50 p-3">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">Verplaatsen naar lijn</div>
+              <div className="flex flex-wrap gap-2">
+                {lineMoveOptions.map(option => {
+                  const disabled = option.isCurrent || option.isLocked || option.blockers.length > 0;
+                  const blockerText = option.blockers
+                    .map(component => `${component.name}${component.code ? ` (${component.code})` : ''}`)
+                    .join(', ');
+                  return (
+                    <button
+                      key={option.line}
+                      type="button"
+                      disabled={disabled}
+                      title={blockerText ? `Mist kalibratie: ${blockerText}` : undefined}
+                      onClick={() => onMoveOrderToLine(option.line)}
+                      className={`px-3 py-2 rounded-lg text-xs font-bold transition-colors ${
+                        option.isCurrent
+                          ? 'bg-green-100 text-green-700'
+                          : option.blockers.length > 0
+                            ? 'bg-orange-50 text-orange-700 border border-orange-200 cursor-not-allowed'
+                            : option.isLocked
+                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                              : 'bg-white text-blue-600 border border-blue-100 hover:bg-blue-50'
+                      }`}
+                    >
+                      {option.isCurrent
+                        ? `ML${option.line} huidig`
+                        : option.blockers.length > 0
+                          ? `ML${option.line} mist kalibratie`
+                          : `Naar ML${option.line}`}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="mt-2 text-[11px] text-gray-400">
+                Verplaatsen wordt geblokkeerd als een bulkgrondstof geen passende bunker/kalibratie op die lijn heeft.
+              </div>
             </div>
           </div>
 
