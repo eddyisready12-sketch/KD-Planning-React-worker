@@ -3777,23 +3777,13 @@ export default function App() {
 
   const getPlannerDisplayEntries = useCallback((lineEntries: ScheduledLineEntry[]) => {
     const nowMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
-    const rank = { direct: 0, prep: 1, wait: 2 } as const;
     const prioritizedEntries = lineEntries
       .filter(entry => entry.order.status === 'planned' || entry.order.status === 'arrived')
       .map((entry, index) => ({
         ...entry,
         originalIndex: index,
         plannerState: getPlannerOrderState(entry.order, index, lineEntries, nowMinutes)
-      }))
-      .sort((a, b) => {
-        const blockDiff = getLoadHoldSequenceRank(b.order) - getLoadHoldSequenceRank(a.order);
-        if (blockDiff !== 0) return blockDiff;
-        const rankDiff = rank[a.plannerState.key] - rank[b.plannerState.key];
-        if (rankDiff !== 0) return rankDiff;
-        const prioDiff = getEffectivePriority(a.order) - getEffectivePriority(b.order);
-        if (prioDiff !== 0) return prioDiff;
-        return a.originalIndex - b.originalIndex;
-      });
+      }));
     if (prioritizedEntries.length === 0) return [];
 
     const lid = prioritizedEntries[0].order.line;
@@ -3831,7 +3821,7 @@ export default function App() {
         plannerState: getPlannerOrderState(order, index, prioritizedEntries as unknown as ScheduledLineEntry[], nowMinutes)
       };
     });
-  }, [currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, getLoadHoldSequenceRank, getEffectivePriority]);
+  }, [currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes]);
 
   const plannerDisplayEntriesByLine = useMemo(() => ({
     1: getPlannerDisplayEntries(lineTimelineByLine[1]),
