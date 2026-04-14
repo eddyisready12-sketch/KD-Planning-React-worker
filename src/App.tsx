@@ -1259,7 +1259,67 @@ export default function App() {
       holdLoadTime: arrivedHoldLoadTime
     };
     const nextOrders = orders.map(o => o.id === arrivedOrder.id ? updatedOrder : o);
+    let nextPlan: Record<LineId, number[]> | null = null;
+
+    if (arrivedHoldLoadTime) {
+      const lid = updatedOrder.line;
+      const lineSource = nextOrders.filter(o => o.status !== 'completed' && o.line === lid);
+      const byId = new Map(lineSource.map(order => [order.id, order]));
+      const currentLineIds = plannedOrderIdsByLine?.[lid]?.filter(id => byId.has(id)) || lineSource.map(order => order.id);
+      const currentLineIdSet = new Set(currentLineIds);
+      const orderedLineIds = [
+        ...currentLineIds,
+        ...lineSource.filter(order => !currentLineIdSet.has(order.id)).map(order => order.id)
+      ].filter(id => id !== updatedOrder.id);
+      const baseDate = parseLocalDate(updatedOrder.date) || currentTime;
+      const heldLoadDateTime = getHeldLoadDateTime(updatedOrder, baseDate);
+      const timelineByOrderId = new Map(lineTimelineByLine[lid].map(entry => [entry.order.id, entry]));
+      let insertIndex = orderedLineIds.length;
+
+      if (heldLoadDateTime) {
+        const firstLaterIndex = orderedLineIds.findIndex(id => {
+          const order = byId.get(id);
+          if (!order || order.status === 'running') return false;
+          const timelineStart = timelineByOrderId.get(id)?.prodStart || getOrderLoadReferenceDateTime(order, baseDate);
+          return !!timelineStart && timelineStart.getTime() >= heldLoadDateTime.getTime();
+        });
+        if (firstLaterIndex >= 0) {
+          insertIndex = firstLaterIndex;
+        }
+      }
+
+      nextPlan = {
+        1: plannedOrderIdsByLine?.[1] ? [...plannedOrderIdsByLine[1]] : nextOrders.filter(o => o.status !== 'completed' && o.line === 1).map(o => o.id),
+        2: plannedOrderIdsByLine?.[2] ? [...plannedOrderIdsByLine[2]] : nextOrders.filter(o => o.status !== 'completed' && o.line === 2).map(o => o.id),
+        3: plannedOrderIdsByLine?.[3] ? [...plannedOrderIdsByLine[3]] : nextOrders.filter(o => o.status !== 'completed' && o.line === 3).map(o => o.id)
+      };
+      nextPlan[lid] = [
+        ...orderedLineIds.slice(0, insertIndex),
+        updatedOrder.id,
+        ...orderedLineIds.slice(insertIndex)
+      ];
+      setPlannedOrderIdsByLine(nextPlan);
+    }
+
     await persistSingleOrder(updatedOrder, nextOrders, 'Order sync mislukt');
+    if (nextPlan && isSupabaseConfigured()) {
+      try {
+        await writePlannedOrderIdsToSupabase(nextPlan);
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : 'Opslaan naar Supabase mislukt';
+        setNotifications(prev => [{
+          id: Date.now(),
+          type: 'fout',
+          icon: 'ERR',
+          titel: 'Lijnvolgorde sync mislukt',
+          tekst: errorMsg,
+          lijn: updatedOrder.line,
+          orderNum: updatedOrder.num,
+          tijd: new Date(),
+          gelezen: false
+        }, ...prev]);
+      }
+    }
     setArrivedOrder(null);
     setArrivedTime('');
     setArrivedHoldLoadTime(false);
