@@ -134,6 +134,37 @@ function normalizeMaterialNameKey(name: string | null | undefined): string {
 
 let runtimeMaterialOverridePairs: Array<{ requestedCode: string; existingCode: string }> = [];
 
+const MIXABLE_MATERIAL_CODE_GROUPS = [
+  ['6000001100', '6000001200']
+];
+
+const MIXABLE_MATERIAL_NAME_GROUPS = [
+  ['fractie1', 'fractie2']
+];
+
+export function materialsMixCompatible(
+  existingName: string | null | undefined,
+  existingCode: string | null | undefined,
+  requestedName: string | null | undefined,
+  requestedCode: string | null | undefined
+): boolean {
+  if (materialsEquivalent(existingName, requestedName)) return false;
+  if (materialCodesEquivalent(existingCode, requestedCode)) return false;
+
+  const existingCodeKey = normalizeMaterialCode(existingCode);
+  const requestedCodeKey = normalizeMaterialCode(requestedCode);
+  const codeMatch = MIXABLE_MATERIAL_CODE_GROUPS.some(group =>
+    group.includes(existingCodeKey) && group.includes(requestedCodeKey)
+  );
+  if (codeMatch) return true;
+
+  const existingNameKey = normalizeMaterialNameKey(existingName);
+  const requestedNameKey = normalizeMaterialNameKey(requestedName);
+  return MIXABLE_MATERIAL_NAME_GROUPS.some(group =>
+    group.includes(existingNameKey) && group.includes(requestedNameKey)
+  );
+}
+
 export function setRuntimeMaterialOverrides(pairs: Array<{ requestedCode: string; existingCode: string }>) {
   runtimeMaterialOverridePairs = pairs
     .map(pair => ({
@@ -151,6 +182,7 @@ export function canUseExistingMaterialForRequested(
 ): boolean {
   if (materialsEquivalent(existingName, requestedName)) return true;
   if (materialCodesEquivalent(existingCode, requestedCode)) return true;
+  if (materialsMixCompatible(existingName, existingCode, requestedName, requestedCode)) return true;
 
   const existingCodeKey = normalizeMaterialCode(existingCode);
   const requestedCodeKey = normalizeMaterialCode(requestedCode);

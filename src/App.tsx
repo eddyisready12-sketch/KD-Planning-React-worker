@@ -7,7 +7,7 @@ import {
   LINES, DEFAULT_CFG, INITIAL_BUNKERS 
 } from './constants';
 import {
-  fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides
+  fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, materialsMixCompatible, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides
 } from './utils';
 import { fetchOrdersFromSheet, fetchBunkersFromSheet, importOrdersFromCsvFile, CalibrationMaterial } from './services/sheetService';
 import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriversFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, setDriverActiveInSupabase, upsertDriverInSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow, type SharedDriver } from './services/supabaseService';
@@ -15,7 +15,7 @@ import { supabase } from './services/supabaseClient';
 import { 
   LayoutDashboard, ClipboardList, Database, Settings, Bell, 
   Truck as TruckIcon, CheckCircle2, Play, X, ChevronUp, ChevronDown,
-  Wrench, AlertTriangle, Check, Clock, Pencil, RefreshCw, Package
+  Wrench, AlertTriangle, Check, Clock, Pencil, RefreshCw, Package, Shuffle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -3505,6 +3505,7 @@ export default function App() {
     }, ...prev]);
   };
   const canBunkerServeOrderComponent = (bunker: Bunker, component: Order['components'][number]) =>
+    canUseExistingMaterialForRequested(bunker.m, bunker.mc, component.name, component.code) ||
     (bunker.ms && bunker.ms.some(m => canUseExistingMaterialForRequested(m, null, component.name, component.code))) ||
     (bunker.materialData && Object.entries(bunker.materialData).some(([mName, mData]) =>
       canUseExistingMaterialForRequested(mName, mData.code, component.name, component.code)
@@ -7562,6 +7563,7 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed, 
   };
 
   const canBunkerServeOrderComponent = (bunker: Bunker, component: Order['components'][number]) =>
+    canUseExistingMaterialForRequested(bunker.m, bunker.mc, component.name, component.code) ||
     (bunker.ms && bunker.ms.some(m => canUseExistingMaterialForRequested(m, null, component.name, component.code))) ||
     (bunker.materialData && Object.entries(bunker.materialData).some(([mName, mData]) =>
       canUseExistingMaterialForRequested(mName, mData.code, component.name, component.code)
@@ -7837,10 +7839,12 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed, 
             <div className="space-y-3">
               {bulkComponents.map((c, i) => {
                 const bunker = bunkerAssignments.get(`${c.name}|${c.code}`);
-                const isMatch = !!bunker && (
+                const isExactMatch = !!bunker && (
                   (bunker.m && (bunker.m === c.name || materialsEquivalent(bunker.m, c.name))) ||
                   (bunker.mc && materialCodesEquivalent(bunker.mc, c.code))
                 );
+                const isMixMatch = !!bunker && materialsMixCompatible(bunker.m, bunker.mc, c.name, c.code);
+                const isMatch = isExactMatch || isMixMatch || (!!bunker && canUseExistingMaterialForRequested(bunker.m, bunker.mc, c.name, c.code));
                 
                 return (
                   <div 
@@ -7848,10 +7852,17 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed, 
                     className={`p-4 rounded-xl border flex items-center justify-between ${isMatch ? 'bg-green-50/50 border-green-100' : 'bg-orange-50/50 border-orange-100'}`}
                   >
                     <div>
-                      <div className="text-sm font-bold text-gray-800">{c.name} - {c.code}</div>
+                      <div className="text-sm font-bold text-gray-800 flex items-center gap-2">
+                        {isMixMatch && (
+                          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-yellow-400 text-gray-900" title="Mag samen in deze bunker">
+                            <Shuffle size={14} />
+                          </span>
+                        )}
+                        <span>{c.name} - {c.code}</span>
+                      </div>
                       <div className={`text-xs mt-0.5 ${isMatch ? 'text-green-600' : 'text-orange-600'}`}>
                         {bunker 
-                          ? (isMatch ? `${bunker.c} bevat al ${bunker.m || c.name}` : `Wissel ${bunker.c} naar ${c.name}`)
+                          ? (isMixMatch ? `${bunker.c} mag mixen: ${bunker.m || 'huidige inhoud'} + ${c.name}` : isMatch ? `${bunker.c} bevat al ${bunker.m || c.name}` : `Wissel ${bunker.c} naar ${c.name}`)
                           : `Geen bunker gevonden voor ${c.name}`
                         }
                       </div>
