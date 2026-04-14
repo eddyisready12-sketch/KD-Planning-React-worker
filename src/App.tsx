@@ -4625,8 +4625,21 @@ export default function App() {
     setDraggedDayRosterOrderId(null);
   };
 
-  const handleRemoveCompletedOrder = (id: number) => {
-    setOrders(prev => prev.filter(o => !(o.id === id && o.status === 'completed')));
+  const handleRestoreCompletedOrder = async (id: number) => {
+    const target = orders.find(o => o.id === id && o.status === 'completed');
+    if (!target) return;
+
+    const updatedOrder: Order = {
+      ...target,
+      status: 'planned',
+      rawStatus: target.rawStatus === 'closed' ? 'planned' : target.rawStatus,
+      arrived: false,
+      arrivedTime: undefined,
+      startedAt: undefined,
+      holdLoadTime: false
+    };
+    const nextOrders = orders.map(o => o.id === id ? updatedOrder : o);
+    await persistSingleOrder(updatedOrder, nextOrders, 'Terugzetten naar gepland mislukt');
   };
 
   const handleClearCompletedOrders = () => {
@@ -6730,7 +6743,7 @@ export default function App() {
                       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                         <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/60 flex items-center justify-between">
                           <div className="text-sm text-gray-500">
-                            {completedOrders.length} voltooide orders lokaal opgeslagen
+                            {completedOrders.length} voltooide orders opgeslagen
                           </div>
                           {completedOrders.length > 0 && (
                             <button
@@ -6770,8 +6783,8 @@ export default function App() {
                                 <td>
                                   <button
                                     className="w-8 h-8 rounded-lg bg-gray-100 text-gray-500 flex items-center justify-center hover:bg-gray-200 hover:text-gray-700 transition-colors"
-                                    onClick={() => handleRemoveCompletedOrder(o.id)}
-                                    title="Verwijder uit Voltooid"
+                                    onClick={() => handleRestoreCompletedOrder(o.id)}
+                                    title="Zet terug naar gepland"
                                   >
                                     <X size={15} />
                                   </button>
