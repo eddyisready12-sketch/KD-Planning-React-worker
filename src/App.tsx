@@ -4020,23 +4020,13 @@ export default function App() {
 
   const operatorDisplayEntries = useMemo(() => {
       const nowMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
-      const rank = { direct: 0, prep: 1, wait: 2 } as const;
   
       const prioritizedEntries = plannedEntries
         .map((entry, index) => ({
           ...entry,
           originalIndex: index,
           operatorState: getOperatorOrderState(entry.order, index, nowMinutes)
-        }))
-      .sort((a, b) => {
-        const blockDiff = getLoadHoldSequenceRank(b.order) - getLoadHoldSequenceRank(a.order);
-        if (blockDiff !== 0) return blockDiff;
-        const rankDiff = rank[a.operatorState.key] - rank[b.operatorState.key];
-        if (rankDiff !== 0) return rankDiff;
-          const prioDiff = getEffectivePriority(a.order) - getEffectivePriority(b.order);
-          if (prioDiff !== 0) return prioDiff;
-          return a.originalIndex - b.originalIndex;
-        });
+        }));
       if (prioritizedEntries.length === 0) return [];
 
       const lid = prioritizedEntries[0].order.line;
@@ -4104,7 +4094,7 @@ export default function App() {
           operatorState
         };
       });
-    }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getLoadHoldSequenceRank, getEffectivePriority]);
+    }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd]);
 
   const nextOperatorOrder = useMemo(
     () => operatorDisplayEntries[0]?.order || null,
