@@ -45,7 +45,7 @@ const HEADER_MAP: Record<string, string[]> = {
   orderNum: ['OrderNummer', 'order', 'ordernr', 'ordernummer', 'order_num', 'num', 'bestelnummer', 'opdracht', 'opdrachtnummer'],
   productionOrder: ['ProductieOrder', 'productieorder', 'productie_order', 'productionorder', 'prodorder', 'prod_order', 'po_nummer', 'P.O.', 'PO', 'p.o.'],
   rit: ['Ritnummer', 'Rit Nummer', 'rit', 'trip', 'route', 'ritnummer', 'rit_nr', 'ritnr'],
-  customer: ['Klantnaam', 'Klant', 'customer', 'klant', 'debiteur', 'naam', 'klantnaam', 'ontvanger'],
+  customer: ['Klantnaam', 'Klant naam', 'Klant', 'customer', 'klant', 'debiteur', 'naam', 'klantnaam', 'ontvanger'],
   line: ['Menglijn', 'Meng-lijn', 'ML', 'line', 'lijn', 'mixline', 'menglijn', 'lijn_nr', 'lijnnr'],
   date: ['Datum', 'Leverdatum', 'datum', 'date', 'plandatum', 'planningsdatum', 'lever_datum'],
   plannedQty: ['Geplande hoeveelheid', 'Gewenst', 'geplandehoeveelheid', 'plannedquantity', 'planned_qty', 'hoeveelheid', 'Gepland van geproduceerd', 'geplandvangeproduceerd'],
@@ -62,8 +62,8 @@ const HEADER_MAP: Record<string, string[]> = {
   unit: ['Comp_Eenheid', 'comp_eenheid', 'compeenheid', 'component_eenheid', 'eenheid_component', 'unit', 'eenheid'],
   pkg: ['Eenheid', 'V', 'pkg', 'packaging', 'packagingtype', 'packaging_type', 'package', 'package_type', 'verpakking', 'verpakkingstype', 'verpakking_type', 'verpakkingsvorm', 'type', 'afvulvorm', 'emballage', 'eenheid', 'vorm'],
   driver: ['Chauffeur', 'Transporteur', 'chauffeur', 'driver', 'truckdriver', 'vervoerder'],
-  yZeile: ['Y-Zeile', 'y_zeile', 'yzeile', 'y zeile'],
-  productName: ['Product', 'product', 'Productnaam', 'productnaam', 'product_name', 'mixnaam', 'omschrijving']
+  yZeile: ['Y-Zeile', 'Y zeile', 'Yzeile', 'Product', 'product', 'y_zeile', 'yzeile', 'y zeile'],
+  productName: ['Product', 'product', 'Y-Zeile', 'Y zeile', 'Yzeile', 'Productnaam', 'productnaam', 'product_name', 'mixnaam', 'omschrijving']
 };
 
 function normalizeHeader(val: string | number | null | undefined): string {
@@ -180,6 +180,79 @@ function parseCsvLine(line: string, delimiter: ',' | ';' | '\t' = ','): string[]
   return result.map(value => value.trim());
 }
 
+function stringifyImportedCell(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const day = String(value.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+  return String(value).trim();
+}
+
+function collapseImportedOrders(importedRows: Order[]): Order[] {
+  const collapsed = new Map<string, Order>();
+  importedRows.forEach(row => {
+    const key = getImportedOrderKey(row);
+    if (collapsed.has(key)) {
+      const existing = collapsed.get(key)!;
+      if (row.components.length) {
+        existing.components.push(...row.components);
+      }
+    } else {
+      row.id = stableOrderHash(key);
+      collapsed.set(key, row);
+    }
+  });
+
+  return Array.from(collapsed.values()).map(order => {
+    const uniqueComponents = new Map<string, OrderComponent>();
+    order.components.forEach(component => {
+      const compKey = [
+        component.code || '',
+        component.name || '',
+        component.value ?? '',
+        component.unit || ''
+      ].join('|');
+      if (!uniqueComponents.has(compKey)) {
+        uniqueComponents.set(compKey, component);
+      }
+    });
+    return {
+      ...order,
+      components: Array.from(uniqueComponents.values())
+    };
+  });
+}
+
+function buildOrdersFromTableRows(
+  rawHeaders: string[],
+  rows: string[][],
+  fallbackDate: string | undefined,
+  idOffset: number
+): Order[] {
+  const indices: Record<string, number> = {};
+  Object.entries(HEADER_MAP).forEach(([key, aliases]) => {
+    indices[key] = getColumnIndex(rawHeaders, aliases);
+  });
+
+  const importedRows = rows.map((values, idx) => {
+    const getValue = (key: string) => {
+      const colIdx = indices[key];
+      if (colIdx === undefined || colIdx === -1) return '';
+      return String(values[colIdx] ?? '').trim();
+    };
+    const order = buildOrderFromValues(getValue, undefined, fallbackDate);
+    if (order) {
+      order.id = idOffset + idx;
+    }
+    return order;
+  }).filter((o): o is Order => o !== null);
+
+  return collapseImportedOrders(importedRows);
+}
+
 function normalizeImportedStatus(value: string): Order['status'] {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'closed' || normalized === 'completed' || normalized === 'voltooid') return 'completed';
@@ -195,7 +268,8 @@ function buildOrderFromValues(
 ): Order | null {
   const recipe = getValue('recipe');
   const orderNum = getValue('orderNum');
-  if (!recipe || !orderNum) return null;
+  const productionOrder = getValue('productionOrder');
+  if (!recipe || (!orderNum && !productionOrder)) return null;
 
   const rawLine = getValue('line');
   const lineVal = parseInt(rawLine.replace(/[^0-9]/g, ''), 10);
@@ -222,9 +296,9 @@ function buildOrderFromValues(
 
   return {
     id: 0,
-    num: orderNum,
+    num: orderNum || productionOrder,
     rit: getValue('rit'),
-    productionOrder: getValue('productionOrder'),
+    productionOrder,
     customer: getValue('customer') || 'Onbekende klant',
     recipe,
     line,
@@ -376,61 +450,66 @@ export async function importOrdersFromCsvFile(file: File, fallbackDate?: string)
 
   const delimiter = detectCsvDelimiter(lines[0]);
   const rawHeaders = parseCsvLine(lines[0], delimiter);
-  const indices: Record<string, number> = {};
-  Object.entries(HEADER_MAP).forEach(([key, aliases]) => {
-    indices[key] = getColumnIndex(rawHeaders, aliases);
-  });
-
-  const importedRows = lines.slice(1).map((line, idx) => {
-    const values = parseCsvLine(line, delimiter);
-    const getValue = (key: string) => {
-      const colIdx = indices[key];
-      if (colIdx === undefined || colIdx === -1) return '';
-      return String(values[colIdx] ?? '').trim();
-    };
-    const order = buildOrderFromValues(getValue, undefined, fallbackDate);
-    if (order) {
-      order.id = 200000 + idx;
-    }
-    return order;
-  }).filter((o): o is Order => o !== null);
+  const importedRows = buildOrdersFromTableRows(
+    rawHeaders,
+    lines.slice(1).map(line => parseCsvLine(line, delimiter)),
+    fallbackDate,
+    200000
+  );
 
   if (importedRows.length === 0) {
     throw new Error('Geen geldige orders gevonden in CSV. Controleer kolommen zoals Meng-lijn, Order Nummer en Item / recept.');
   }
 
-  const collapsed = new Map<string, Order>();
-  importedRows.forEach(row => {
-    const key = getImportedOrderKey(row);
-    if (collapsed.has(key)) {
-      const existing = collapsed.get(key)!;
-      if (row.components.length) {
-        existing.components.push(...row.components);
-      }
-    } else {
-      row.id = stableOrderHash(key);
-      collapsed.set(key, row);
-    }
+  return importedRows;
+}
+
+function isExcelFile(file: File): boolean {
+  const name = file.name.toLowerCase();
+  return name.endsWith('.xlsx') || name.endsWith('.xls');
+}
+
+export async function importOrdersFromExcelFile(file: File, fallbackDate?: string): Promise<Order[]> {
+  const XLSX = await import('xlsx');
+  const data = await file.arrayBuffer();
+  const workbook = XLSX.read(data, { type: 'array', cellDates: true });
+  const sheetName = workbook.SheetNames.find(name => {
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[name], { header: 1, defval: '', raw: false });
+    return rows.some(row => Array.isArray(row) && row.some(cell => stringifyImportedCell(cell)));
   });
 
-  return Array.from(collapsed.values()).map(order => {
-    const uniqueComponents = new Map<string, OrderComponent>();
-    order.components.forEach(component => {
-      const compKey = [
-        component.code || '',
-        component.name || '',
-        component.value ?? '',
-        component.unit || ''
-      ].join('|');
-      if (!uniqueComponents.has(compKey)) {
-        uniqueComponents.set(compKey, component);
-      }
-    });
-    return {
-      ...order,
-      components: Array.from(uniqueComponents.values())
-    };
+  if (!sheetName) return [];
+
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, defval: '', raw: false })
+    .map(row => row.map(stringifyImportedCell))
+    .filter(row => row.some(value => value.trim().length > 0));
+
+  if (rows.length < 2) return [];
+
+  const headerIndex = rows.findIndex(row => {
+    const recipeIdx = getColumnIndex(row, HEADER_MAP.recipe);
+    const orderIdx = getColumnIndex(row, HEADER_MAP.orderNum);
+    const productionOrderIdx = getColumnIndex(row, HEADER_MAP.productionOrder);
+    return recipeIdx !== -1 && (orderIdx !== -1 || productionOrderIdx !== -1);
   });
+
+  if (headerIndex === -1) {
+    throw new Error('Geen geldige kopregel gevonden in Excel. Controleer kolommen zoals ML, Order Nummer of P.O. en Item / recept.');
+  }
+
+  const importedRows = buildOrdersFromTableRows(rows[headerIndex], rows.slice(headerIndex + 1), fallbackDate, 300000);
+
+  if (importedRows.length === 0) {
+    throw new Error('Geen geldige orders gevonden in Excel. Controleer kolommen zoals ML, Order Nummer of P.O. en Item / recept.');
+  }
+
+  return importedRows;
+}
+
+export async function importOrdersFromLocalFile(file: File, fallbackDate?: string): Promise<Order[]> {
+  return isExcelFile(file)
+    ? importOrdersFromExcelFile(file, fallbackDate)
+    : importOrdersFromCsvFile(file, fallbackDate);
 }
 
 export interface CalibrationMaterial {

@@ -9,7 +9,7 @@ import {
 import {
   fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, materialsMixCompatible, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides, FRACTION_MIX_MATERIAL_NAME, FRACTION_MIX_MATERIAL_CODE, isFractieMixMaterial
 } from './utils';
-import { fetchOrdersFromSheet, fetchBunkersFromSheet, importOrdersFromCsvFile, CalibrationMaterial } from './services/sheetService';
+import { fetchOrdersFromSheet, fetchBunkersFromSheet, importOrdersFromLocalFile, CalibrationMaterial } from './services/sheetService';
 import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriversFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, setDriverActiveInSupabase, upsertDriverInSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow, type SharedDriver } from './services/supabaseService';
 import { supabase } from './services/supabaseClient';
 import { 
@@ -578,13 +578,13 @@ export default function App() {
     });
   };
 
-  const handleLocalCsvImport = async (file: File | null) => {
+  const handleLocalOrderImport = async (file: File | null) => {
     if (!file) return;
     setIsImportingCsv(true);
     setCsvImportFeedback({ type: 'busy', text: `Bezig met importeren van ${file.name} voor ${csvImportDate}...` });
     setDataSource(prev => ({ ...prev, loading: true, error: null }));
     try {
-      const importedOrders = await importOrdersFromCsvFile(file, csvImportDate);
+      const importedOrders = await importOrdersFromLocalFile(file, csvImportDate);
       if (isSupabaseConfigured() && importedOrders.length > 0) {
         await writeOrdersToSupabase(importedOrders, { preserveExistingSchedule: true });
       }
@@ -595,7 +595,7 @@ export default function App() {
         id: Date.now(),
         type: 'ok',
         icon: 'OK',
-        titel: 'CSV geïmporteerd',
+        titel: 'Orderbestand geïmporteerd',
         tekst: `${finalOrders.length} orders geladen uit ${file.name}`,
         lijn: null,
         orderNum: null,
@@ -604,13 +604,13 @@ export default function App() {
       }, ...prev]);
       setCsvImportFeedback({ type: 'ok', text: `${finalOrders.length} orders succesvol geladen uit ${file.name}` });
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'CSV import mislukt';
+      const errorMsg = err instanceof Error ? err.message : 'Orderimport mislukt';
       setDataSource(prev => ({ ...prev, loading: false, error: errorMsg }));
       setNotifications(prev => [{
         id: Date.now(),
         type: 'fout',
         icon: 'ERR',
-        titel: 'CSV import mislukt',
+        titel: 'Orderimport mislukt',
         tekst: errorMsg,
         lijn: null,
         orderNum: null,
@@ -7268,10 +7268,10 @@ export default function App() {
                 </div>
 
                 <div className="bg-white border border-gray-200 rounded-lg p-5 mb-4">
-                  <h2 className="text-sm font-bold mb-3.5">Lokale CSV Import</h2>
+                  <h2 className="text-sm font-bold mb-3.5">Lokale order-import</h2>
                   <div className="space-y-3">
                     <div className="text-xs text-gray-500">
-                      Importeer een lokale order-CSV met kolommen zoals `Menglijn`, `Order Nummer`, `Klantnaam`, `Product`, `Item / recept`, `Ritnummer`, `Geplande hoeveelheid`, `Gepland aantal` en `Eenheid`. Als de CSV geen `Datum` kolom heeft, gebruiken we de importdatum hieronder.
+                      Importeer een lokaal CSV-, XLS- of XLSX-bestand met kolommen zoals `Menglijn`, `Order Nummer`, `P.O.`, `Klantnaam`, `Product`, `Item / recept`, `Ritnummer`, `Geplande hoeveelheid`, `Gepland aantal` en `Eenheid`. Als het bestand geen `Datum` kolom heeft, gebruiken we de importdatum hieronder.
                     </div>
                     <label className="block">
                       <span className="block text-[11px] font-medium text-gray-500 mb-1">Importdatum</span>
@@ -7285,17 +7285,17 @@ export default function App() {
                     </label>
                     <input
                       type="file"
-                      accept=".csv,text/csv"
+                      accept=".csv,text/csv,.xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                       className="fi"
                       onChange={async (e) => {
                         const file = e.target.files?.[0] || null;
-                        await handleLocalCsvImport(file);
+                        await handleLocalOrderImport(file);
                         e.currentTarget.value = '';
                       }}
                       disabled={isImportingCsv || dataSource.loading}
                     />
                     <div className="text-[11px] text-gray-400">
-                      De import schrijft direct naar Supabase en ververst daarna de orders in de app. Zonder CSV-datum wordt `order_date` gevuld met deze importdatum.
+                      De import schrijft direct naar Supabase en ververst daarna de orders in de app. Zonder bestandsdatum wordt `order_date` gevuld met deze importdatum.
                     </div>
                     {csvImportFeedback && (
                       <div className={`text-[11px] font-medium ${
