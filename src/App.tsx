@@ -2881,9 +2881,20 @@ export default function App() {
     }
 
     while (pool.length > 0) {
+      const urgentPlanCursor = getLinePlanCursor(plan, lid);
       const arrivedEtaCandidates = pool
         .map((order, index) => ({ order, index }))
-        .filter(({ order }) => order.status === 'arrived' && !!getOrderLoadReferenceTime(order));
+        .filter(({ order }) => {
+          if (order.status !== 'arrived' || !getOrderLoadReferenceTime(order)) return false;
+          const etaMins = etaToMins(getOrderLoadReferenceTime(order));
+          if (etaMins === null) return false;
+
+          // A confirmed load time is a hard window, not a reason to pull the
+          // truck hours forward. Only let it jump the queue when the planned
+          // cursor is already close to that loading window.
+          const urgencyMargin = order.holdLoadTime ? 45 : 30;
+          return etaMins <= urgentPlanCursor.current + urgencyMargin;
+        });
 
       if (arrivedEtaCandidates.length > 0) {
         arrivedEtaCandidates.sort((a, b) => {
@@ -2967,6 +2978,7 @@ export default function App() {
           let candidateStartMinutes = plan.length === 0
             ? (planCursor.firstOrderStart - planCursor.baseDayStart)
             : planCursor.current;
+          const naturalCandidateStartMinutes = candidateStartMinutes;
 
           if (isBagPkg(order) && planCursor.nextAllowedBagProdStart !== null) {
             candidateStartMinutes = Math.max(candidateStartMinutes, planCursor.nextAllowedBagProdStart - transitionMinutes);
@@ -2990,12 +3002,20 @@ export default function App() {
           let etaCanBreakLargeBlock = false;
           let safeSlackBonus = 0;
           let futureBulkLoadPenalty = 0;
+          let loadWaitGapPenalty = 0;
           let holdLoadTimeBonus = 0;
           if (hasEta) {
             const earliestAllowed = planCursor.baseDayStart + etaMins!;
             const latestAllowed = earliestAllowed + (order.status === 'arrived' ? 30 : config[lid].maxWait);
             const earlySlack = candidateProdStartMinutes - earliestAllowed;
             const slack = latestAllowed - candidateProdStartMinutes;
+            const requiredPrepStart = etaMins! - transitionMinutes;
+            const waitGap = Math.max(0, requiredPrepStart - naturalCandidateStartMinutes);
+            if (waitGap > 0 && order.pkg === 'bulk' && effPrio > 1) {
+              // Bulk with a confirmed but future loading time should not reserve
+              // the line while direct/BAL/BAG work can fill that gap.
+              loadWaitGapPenalty = 90000 + (waitGap * 4500);
+            }
             if (earlySlack < 0) {
               loadWindowPenalty = 200000 + (Math.abs(earlySlack) * 5000);
               if (order.pkg === 'bulk') {
@@ -3022,6 +3042,7 @@ export default function App() {
               effPrio * 100000 +
               deferredBulkPenalty +
               futureBulkLoadPenalty +
+              loadWaitGapPenalty +
               0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
@@ -3050,6 +3071,7 @@ export default function App() {
               effPrio * 100000 +
               deferredBulkPenalty +
               futureBulkLoadPenalty +
+              loadWaitGapPenalty +
               0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
@@ -3077,6 +3099,7 @@ export default function App() {
               effPrio * 100000 +
               deferredBulkPenalty +
               futureBulkLoadPenalty +
+              loadWaitGapPenalty +
               0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
@@ -3105,6 +3128,7 @@ export default function App() {
               effPrio * 100000 +
               deferredBulkPenalty +
               futureBulkLoadPenalty +
+              loadWaitGapPenalty +
               0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
