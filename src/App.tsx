@@ -2,7 +2,7 @@
 import { 
   LineId, Order, Bunker, Melding, Storing, AppConfig, Truck, PlannerTrigger, OrderComponent 
 } from './types';
-import { useRef } from 'react';
+import { useRef, useDeferredValue } from 'react';
 import { 
   LINES, DEFAULT_CFG, INITIAL_BUNKERS 
 } from './constants';
@@ -306,6 +306,21 @@ function mergeSharedCalibrationIntoBunkers(
   };
 }
 
+function LiveClock() {
+  const [now, setNow] = useState(() => new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <div className="text-xs text-gray-500 tabular-nums font-medium">
+      {now.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+    </div>
+  );
+}
+
 export default function App() {
   const [view, setView] = useState<'operator' | 'planner' | 'bunkers' | 'settings' | 'notifications'>('operator');
   const [plannerTab, setPlannerTab] = useState<'schema' | 'dagrooster' | 'wachtrij' | 'chauffeurs' | 'vrachtwagens' | 'voltooid'>('schema');
@@ -349,6 +364,21 @@ export default function App() {
   const draggedOperatorOrderIdRef = useRef<number | null>(null);
   const [operatorDropTargetId, setOperatorDropTargetId] = useState<number | null>(null);
   const [manualOperatorOrderLines, setManualOperatorOrderLines] = useState<Partial<Record<LineId, boolean>>>({});
+  const deferredPlannerSearch = useDeferredValue(plannerSearch);
+  const deferredChauffeurSearch = useDeferredValue(chauffeurSearch);
+  const isPlannerView = view === 'planner';
+  const changeView = useCallback((nextView: typeof view) => {
+    React.startTransition(() => setView(nextView));
+  }, []);
+  const changePlannerTab = useCallback((nextTab: typeof plannerTab) => {
+    React.startTransition(() => setPlannerTab(nextTab));
+  }, []);
+  const changeSelectedLine = useCallback((nextLine: LineId) => {
+    React.startTransition(() => setSelectedLine(nextLine));
+  }, []);
+  const changePlannerLineFilter = useCallback((nextLine: number) => {
+    React.startTransition(() => setPlannerLineFilter(nextLine));
+  }, []);
   const [isClearingOrders, setIsClearingOrders] = useState(false);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
   const [csvImportFeedback, setCsvImportFeedback] = useState<{ type: 'ok' | 'error' | 'busy'; text: string } | null>(null);
@@ -1712,7 +1742,7 @@ export default function App() {
 
   // Tickers
   useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    const timer = setInterval(() => setCurrentTime(new Date()), 5000);
     const planningTimer = setInterval(() => setPlanningTime(new Date()), 15000);
     const progTimer = setInterval(() => {
       setProgress(p => Math.min(p + 0.06, 99));
@@ -3453,7 +3483,7 @@ export default function App() {
   };
 
   const editIssue = (line: LineId, issue: NonNullable<typeof storingen[LineId]>) => {
-    if (selectedLine !== line) setSelectedLine(line);
+    if (selectedLine !== line) changeSelectedLine(line);
     setIssueDialogType(issue.soort);
     setIssueDescription(issue.omschrijving);
     setIssueDuration(issue.duur ? String(issue.duur) : '');
@@ -3934,11 +3964,16 @@ export default function App() {
     });
   }, [planningTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, getOrderLoadReferenceTime]);
 
-  const plannerDisplayEntriesByLine = useMemo(() => ({
-    1: getPlannerDisplayEntries(lineTimelineByLine[1]),
-    2: getPlannerDisplayEntries(lineTimelineByLine[2]),
-    3: getPlannerDisplayEntries(lineTimelineByLine[3])
-  }), [lineTimelineByLine, getPlannerDisplayEntries]);
+  const plannerDisplayEntriesByLine = useMemo(() => {
+    if (!isPlannerView) {
+      return { 1: [], 2: [], 3: [] } as Record<LineId, ScheduledLineEntry[]>;
+    }
+    return {
+      1: getPlannerDisplayEntries(lineTimelineByLine[1]),
+      2: getPlannerDisplayEntries(lineTimelineByLine[2]),
+      3: getPlannerDisplayEntries(lineTimelineByLine[3])
+    };
+  }, [isPlannerView, lineTimelineByLine, getPlannerDisplayEntries]);
 
   const plannerVisibleDates = useMemo(() => {
     const allDates = lineIds
@@ -3956,12 +3991,13 @@ export default function App() {
   }, [plannerVisibleDates, planningTime]);
 
   useEffect(() => {
+    if (!isPlannerView) return;
     const hasSelectedDate = plannerVisibleDates.some(date => formatLocalDate(date) === plannerSelectedDate);
     if (!hasSelectedDate) {
       const nextVisibleDate = plannerVisibleDates[0] ? formatLocalDate(plannerVisibleDates[0]) : formatLocalDate(planningTime);
       setPlannerSelectedDate(nextVisibleDate);
     }
-  }, [plannerVisibleDates, plannerSelectedDate, planningTime]);
+  }, [isPlannerView, plannerVisibleDates, plannerSelectedDate, planningTime]);
 
   const filteredPlannerDisplayEntriesByLine = useMemo(() => {
     const isVisibleOnSelectedDate = (entry: ScheduledLineEntry) => {
@@ -3992,7 +4028,8 @@ export default function App() {
   );
 
   const dayRosterEntries = useMemo(() => {
-    const search = plannerSearch.trim().toLowerCase();
+    if (!isPlannerView || plannerTab !== 'dagrooster') return [];
+    const search = deferredPlannerSearch.trim().toLowerCase();
     return lineIds
       .filter(lid => plannerLineFilter === 0 || lid === plannerLineFilter)
       .flatMap(lid =>
@@ -4041,7 +4078,7 @@ export default function App() {
         if (a.order.line !== b.order.line) return a.order.line - b.order.line;
         return a.order.customer.localeCompare(b.order.customer, 'nl-NL');
       });
-  }, [filteredPlannerDisplayEntriesByLine, lineIds, plannerLineFilter, plannerSearch]);
+  }, [isPlannerView, plannerTab, filteredPlannerDisplayEntriesByLine, lineIds, plannerLineFilter, deferredPlannerSearch]);
 
   const dayRosterColumns = useMemo(() => {
     const assignedDrivers = Array.from(new Set(
@@ -4369,6 +4406,7 @@ export default function App() {
   [completedOrders]);
 
   const truckOrders = useMemo(() => {
+    if (!isPlannerView || plannerTab !== 'vrachtwagens') return [];
     return activeOrders
       .filter(o => o.pkg === 'bulk')
       .slice()
@@ -4379,9 +4417,10 @@ export default function App() {
         if (a.line !== b.line) return a.line - b.line;
         return a.customer.localeCompare(b.customer);
       });
-  }, [activeOrders]);
+  }, [isPlannerView, plannerTab, activeOrders]);
 
   const plannerDrivers = useMemo(() => {
+    if (!isPlannerView) return [];
     const driverCounts = new Map<string, { count: number; lines: Set<LineId>; totalVolume: number; firstStart: number | null; lastEnd: number | null }>();
     plannedActiveOrders
       .filter(order => plannerLineFilter === 0 || order.line === plannerLineFilter)
@@ -4423,18 +4462,20 @@ export default function App() {
       };
       })
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'nl-NL'));
-  }, [plannedActiveOrders, plannerLineFilter, lineTimelineEntryByOrderId, sharedDriverNames, sharedDrivers]);
+  }, [isPlannerView, plannedActiveOrders, plannerLineFilter, lineTimelineEntryByOrderId, sharedDriverNames, sharedDrivers]);
 
   const visiblePlannerDrivers = useMemo(() => {
-    const q = chauffeurSearch.trim().toLowerCase();
+    if (!isPlannerView || plannerTab !== 'chauffeurs') return [];
+    const q = deferredChauffeurSearch.trim().toLowerCase();
     if (!q) return plannerDrivers;
     return plannerDrivers.filter(driver =>
       driver.name.toLowerCase().includes(q) ||
       driver.lines.some(line => `ml${line}`.includes(q))
     );
-  }, [plannerDrivers, chauffeurSearch]);
+  }, [isPlannerView, plannerTab, plannerDrivers, deferredChauffeurSearch]);
 
   const chauffeurOrders = useMemo(() => {
+    if (!isPlannerView || plannerTab !== 'chauffeurs') return [];
     return plannedActiveOrders
       .filter(o => plannerLineFilter === 0 || o.line === plannerLineFilter)
       .filter(o => {
@@ -4443,7 +4484,7 @@ export default function App() {
         return true;
       })
       .filter(o => {
-        const s = plannerSearch.toLowerCase();
+        const s = deferredPlannerSearch.toLowerCase();
         return (
           !s ||
           o.customer.toLowerCase().includes(s) ||
@@ -4453,7 +4494,7 @@ export default function App() {
           (o.driver || '').toLowerCase().includes(s)
         );
       });
-  }, [plannedActiveOrders, plannerLineFilter, plannerSearch, chauffeurTypeFilter]);
+  }, [isPlannerView, plannerTab, plannedActiveOrders, plannerLineFilter, deferredPlannerSearch, chauffeurTypeFilter]);
 
   const selectedDriverOrders = useMemo(() => {
     return chauffeurOrders
@@ -4620,12 +4661,19 @@ export default function App() {
   }, [visiblePlannerDrivers, selectedDriverName]);
 
   const lineDebug = useMemo(() => {
+    const countsByLine = {
+      1: activeOrders.filter(o => o.line === 1).length,
+      2: activeOrders.filter(o => o.line === 2).length,
+      3: activeOrders.filter(o => o.line === 3).length,
+    };
+
     return {
       total: orders.length,
       active: activeOrders.length,
-      ml1: activeOrders.filter(o => o.line === 1).length,
-      ml2: activeOrders.filter(o => o.line === 2).length,
-      ml3: activeOrders.filter(o => o.line === 3).length,
+      ml1: countsByLine[1],
+      ml2: countsByLine[2],
+      ml3: countsByLine[3],
+      countsByLine,
     };
   }, [orders, activeOrders]);
 
@@ -4770,19 +4818,19 @@ export default function App() {
         </div>
 
         <nav className="flex items-center gap-0.5 min-w-0 flex-wrap">
-          <button className={`nt ${view === 'operator' ? 'on' : ''}`} onClick={() => setView('operator')}>
+          <button className={`nt ${view === 'operator' ? 'on' : ''}`} onClick={() => changeView('operator')}>
             <LayoutDashboard size={16} /> Operator
           </button>
-          <button className={`nt ${view === 'planner' ? 'on' : ''}`} onClick={() => setView('planner')}>
+          <button className={`nt ${view === 'planner' ? 'on' : ''}`} onClick={() => changeView('planner')}>
             <ClipboardList size={16} /> Planner
           </button>
-          <button className={`nt ${view === 'bunkers' ? 'on' : ''}`} onClick={() => setView('bunkers')}>
+          <button className={`nt ${view === 'bunkers' ? 'on' : ''}`} onClick={() => changeView('bunkers')}>
             <Database size={16} /> Bunkers
           </button>
-          <button className={`nt ${view === 'settings' ? 'on' : ''}`} onClick={() => setView('settings')}>
+          <button className={`nt ${view === 'settings' ? 'on' : ''}`} onClick={() => changeView('settings')}>
             <Settings size={16} /> Instellingen
           </button>
-          <button className={`nt ${view === 'notifications' ? 'on' : ''}`} onClick={() => setView('notifications')}>
+          <button className={`nt ${view === 'notifications' ? 'on' : ''}`} onClick={() => changeView('notifications')}>
             <Bell size={16} /> 
             {notifications.filter(m => !m.gelezen).length > 0 && (
               <span className="inline-flex items-center justify-center bg-red-500 text-white rounded-full w-4 h-4 text-[10px] font-bold ml-1">
@@ -4806,9 +4854,7 @@ export default function App() {
             <div className="text-[11px] text-gray-400 uppercase tracking-wider">Gedraaid</div>
             <div className="text-[13px] font-bold text-grd">{totalCompletedM3.toFixed(1)} m3</div>
           </div>
-          <div className="text-xs text-gray-500 tabular-nums font-medium">
-            {currentTime.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-          </div>
+          <LiveClock />
         </div>
       </header>
 
@@ -4905,13 +4951,13 @@ export default function App() {
       </AnimatePresence>
 
       <main className="flex-1 overflow-y-auto p-7 min-h-0">
-        <AnimatePresence mode="wait">
+        <AnimatePresence initial={false}>
           <motion.div
             key={view}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.2 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.08 }}
           >
             {view === 'operator' && (
               <div className="max-w-6xl mx-auto">
@@ -4996,7 +5042,7 @@ export default function App() {
                             <button
                               className="rounded-xl border border-green-200 bg-white px-4 py-2.5 text-sm font-semibold text-blue-700 hover:bg-green-50"
                               onClick={() => {
-                                if (selectedLine !== line) setSelectedLine(line);
+                                if (selectedLine !== line) changeSelectedLine(line);
                                 persistIssue(line, null);
                                 setNotifications(prev => [{
                                   id: Date.now(),
@@ -5026,8 +5072,8 @@ export default function App() {
                     <button
                       className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
                       onClick={() => {
-                        setView('planner');
-                        setPlannerTab('wachtrij');
+                        changeView('planner');
+                        changePlannerTab('wachtrij');
                       }}
                     >
                       Order wachtrij
@@ -5057,13 +5103,13 @@ export default function App() {
 
                 <div className="flex gap-1.5 mb-4.5">
                   {(Object.keys(LINES) as unknown as LineId[]).map(l => {
-                    const count = activeOrders.filter(o => o.line === l).length;
+                    const count = lineDebug.countsByLine[l] || 0;
                     const hasIssue = !!storingen[l]?.actief;
                     return (
                       <button 
                         key={l}
                         className={`ltab flex items-center gap-2 ${selectedLine === l ? 'on' : ''}`}
-                        onClick={() => setSelectedLine(l)}
+                        onClick={() => changeSelectedLine(l)}
                       >
                         {hasIssue && (
                           <span className={`inline-block h-2 w-2 rounded-full ${
@@ -5560,7 +5606,7 @@ export default function App() {
                       <button 
                         key={t.id}
                         className={`px-4 py-3 text-sm font-medium border-b-2 transition-all whitespace-nowrap ${plannerTab === t.id ? 'border-gr text-gr' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
-                        onClick={() => setPlannerTab(t.id as any)}
+                        onClick={() => changePlannerTab(t.id as typeof plannerTab)}
                       >
                         {t.lbl}
                       </button>
@@ -5594,7 +5640,7 @@ export default function App() {
                       <button 
                         key={l.id}
                         className={`ltab flex items-center gap-2 ${plannerLineFilter === l.id ? 'on' : ''}`}
-                        onClick={() => setPlannerLineFilter(l.id)}
+                        onClick={() => changePlannerLineFilter(l.id)}
                       >
                         {!!storingen[l.id as LineId]?.actief && (
                           <span className={`inline-block h-2 w-2 rounded-full ${
@@ -5621,13 +5667,13 @@ export default function App() {
                 </div>
 
                 {/* Sub View Content */}
-                <AnimatePresence mode="wait">
+                <AnimatePresence initial={false}>
                   <motion.div
                     key={plannerTab}
-                    initial={{ opacity: 0, x: 10 }}
+                    initial={{ opacity: 0 }}
                     animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -10 }}
-                    transition={{ duration: 0.15 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.06 }}
                   >
                     {plannerTab === 'dagrooster' && (
                       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
