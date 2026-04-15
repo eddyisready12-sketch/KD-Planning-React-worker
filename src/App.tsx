@@ -7,7 +7,7 @@ import {
   LINES, DEFAULT_CFG, INITIAL_BUNKERS 
 } from './constants';
 import {
-  fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, materialsMixCompatible, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides
+  fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, materialsMixCompatible, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides, FRACTION_MIX_MATERIAL_NAME, FRACTION_MIX_MATERIAL_CODE, isFractieMixMaterial
 } from './utils';
 import { fetchOrdersFromSheet, fetchBunkersFromSheet, importOrdersFromCsvFile, CalibrationMaterial } from './services/sheetService';
 import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriversFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, setDriverActiveInSupabase, upsertDriverInSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow, type SharedDriver } from './services/supabaseService';
@@ -1109,14 +1109,15 @@ export default function App() {
     if (idx === -1) return;
 
     const bunker = lineBunkers[idx];
-    const calMat = calibrationMaterials.find(m => m.name === newMaterial);
-    const specificData = newMaterial ? bunker.materialData?.[newMaterial] : null;
+    const isFractionMix = newMaterial === FRACTION_MIX_MATERIAL_NAME;
+    const calMat = isFractionMix ? null : calibrationMaterials.find(m => m.name === newMaterial);
+    const specificData = newMaterial && !isFractionMix ? bunker.materialData?.[newMaterial] : null;
 
     lineBunkers[idx] = {
       ...bunker,
       m: newMaterial,
-      mc: specificData?.code || calMat?.code || orders.flatMap(o => o.components).find(c => c.name === newMaterial)?.code || null,
-      calibrationValue: specificData?.calibrationValue ?? calMat?.calibrationValue ?? bunker.calibrationValue
+      mc: isFractionMix ? FRACTION_MIX_MATERIAL_CODE : specificData?.code || calMat?.code || orders.flatMap(o => o.components).find(c => c.name === newMaterial)?.code || null,
+      calibrationValue: isFractionMix ? null : specificData?.calibrationValue ?? calMat?.calibrationValue ?? bunker.calibrationValue
     };
 
     const nextBunkers: Record<LineId, Bunker[]> = { ...bunkers, [lid]: lineBunkers };
@@ -5251,7 +5252,14 @@ export default function App() {
                           >
                             <div className="text-xs font-bold text-gray-700 min-w-[40px]">{b.c}</div>
                             <div className="flex-1 min-w-0">
-                              <div className="text-xs text-gray-600 truncate">{b.m || 'Leeg'}</div>
+                              <div className="text-xs text-gray-600 truncate flex items-center gap-1.5">
+                                {isFractieMixMaterial(b.m, b.mc) && (
+                                  <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-yellow-400 text-gray-900" title="Mixbunker">
+                                    <Shuffle size={10} />
+                                  </span>
+                                )}
+                                <span className="truncate">{b.m || 'Leeg'}</span>
+                              </div>
                               {b.calibrationValue !== null && b.calibrationValue !== undefined && (
                                 <div className="text-[9px] text-blue-500 font-bold">K: {b.calibrationValue}</div>
                               )}
@@ -6887,7 +6895,14 @@ export default function App() {
                           >
                             <div className="text-[11px] font-bold text-gray-700">{b.c}</div>
                             <div className="flex-1 min-w-0">
-                              <div className="text-xs text-gray-600 truncate">{b.m || 'Leeg'}</div>
+                              <div className="text-xs text-gray-600 truncate flex items-center gap-1.5">
+                                {isFractieMixMaterial(b.m, b.mc) && (
+                                  <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-yellow-400 text-gray-900" title="Mixbunker">
+                                    <Shuffle size={10} />
+                                  </span>
+                                )}
+                                <span className="truncate">{b.m || 'Leeg'}</span>
+                              </div>
                               {b.mc && <div className="text-[9px] text-gray-400 font-mono">{b.mc}</div>}
                               {b.calibrationValue !== null && b.calibrationValue !== undefined && (
                                 <div className="text-[9px] text-blue-500 font-bold">K: {b.calibrationValue}</div>
@@ -7110,7 +7125,14 @@ export default function App() {
                     <label className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2 block">Huidige Grondstof</label>
                     <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 flex items-center justify-between">
                       <div>
-                        <div className="text-sm font-bold text-gray-800">{selectedBunker.bunker.m || 'Leeg'}</div>
+                        <div className="text-sm font-bold text-gray-800 flex items-center gap-2">
+                          {isFractieMixMaterial(selectedBunker.bunker.m, selectedBunker.bunker.mc) && (
+                            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-yellow-400 text-gray-900" title="Mixbunker">
+                              <Shuffle size={14} />
+                            </span>
+                          )}
+                          <span>{selectedBunker.bunker.m || 'Leeg'}</span>
+                        </div>
                         {selectedBunker.bunker.mc && <div className="text-xs text-gray-400 font-mono">{selectedBunker.bunker.mc}</div>}
                       </div>
                       <button 
@@ -7120,6 +7142,24 @@ export default function App() {
                         Leegmaken
                       </button>
                     </div>
+                    {!isFractieMixMaterial(selectedBunker.bunker.m, selectedBunker.bunker.mc) && (
+                      <button
+                        type="button"
+                        onClick={() => handleBunkerUpdate(selectedBunker.lid, selectedBunker.bunker.c, FRACTION_MIX_MATERIAL_NAME)}
+                        className="mt-2 w-full p-3 text-left rounded-xl border border-yellow-200 bg-yellow-50 hover:bg-yellow-100 transition-colors flex items-center justify-between"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-yellow-400 text-gray-900">
+                            <Shuffle size={16} />
+                          </span>
+                          <div>
+                            <div className="text-sm font-bold text-gray-800">{FRACTION_MIX_MATERIAL_NAME}</div>
+                            <div className="text-[10px] text-gray-500 font-mono">{FRACTION_MIX_MATERIAL_CODE}</div>
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-bold uppercase text-yellow-700">Mix zetten</span>
+                      </button>
+                    )}
                   </div>
 
                   <div className="mb-4 p-3 bg-blue-50/60 rounded-xl border border-blue-100">

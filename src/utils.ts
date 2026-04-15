@@ -142,6 +142,35 @@ const MIXABLE_MATERIAL_NAME_GROUPS = [
   ['fractie1', 'fractie2']
 ];
 
+export const FRACTION_MIX_MATERIAL_NAME = 'Fractie 1 + Fractie 2';
+export const FRACTION_MIX_MATERIAL_CODE = '6000001100+6000001200';
+
+function normalizeMaterialCodeTokens(code: string | null | undefined): string[] {
+  return String(code || '')
+    .split(/[^0-9]+/g)
+    .map(part => normalizeMaterialCode(part))
+    .filter(Boolean);
+}
+
+function materialMatchesMixGroup(
+  name: string | null | undefined,
+  code: string | null | undefined,
+  codeGroup: string[],
+  nameGroup: string[]
+): boolean {
+  const codeTokens = normalizeMaterialCodeTokens(code);
+  if (codeTokens.some(token => codeGroup.includes(token))) return true;
+
+  const nameKey = normalizeMaterialNameKey(name);
+  if (nameGroup.includes(nameKey)) return true;
+  return nameGroup.every(part => nameKey.includes(part));
+}
+
+export function isFractieMixMaterial(name: string | null | undefined, code: string | null | undefined): boolean {
+  return materialMatchesMixGroup(name, code, MIXABLE_MATERIAL_CODE_GROUPS[0], MIXABLE_MATERIAL_NAME_GROUPS[0]) &&
+    MIXABLE_MATERIAL_NAME_GROUPS[0].every(part => normalizeMaterialNameKey(name).includes(part) || normalizeMaterialCodeTokens(code).length > 1);
+}
+
 export function materialsMixCompatible(
   existingName: string | null | undefined,
   existingCode: string | null | undefined,
@@ -151,18 +180,11 @@ export function materialsMixCompatible(
   if (materialsEquivalent(existingName, requestedName)) return false;
   if (materialCodesEquivalent(existingCode, requestedCode)) return false;
 
-  const existingCodeKey = normalizeMaterialCode(existingCode);
-  const requestedCodeKey = normalizeMaterialCode(requestedCode);
-  const codeMatch = MIXABLE_MATERIAL_CODE_GROUPS.some(group =>
-    group.includes(existingCodeKey) && group.includes(requestedCodeKey)
-  );
-  if (codeMatch) return true;
-
-  const existingNameKey = normalizeMaterialNameKey(existingName);
-  const requestedNameKey = normalizeMaterialNameKey(requestedName);
-  return MIXABLE_MATERIAL_NAME_GROUPS.some(group =>
-    group.includes(existingNameKey) && group.includes(requestedNameKey)
-  );
+  return MIXABLE_MATERIAL_CODE_GROUPS.some((codeGroup, index) => {
+    const nameGroup = MIXABLE_MATERIAL_NAME_GROUPS[index] || [];
+    return materialMatchesMixGroup(existingName, existingCode, codeGroup, nameGroup) &&
+      materialMatchesMixGroup(requestedName, requestedCode, codeGroup, nameGroup);
+  });
 }
 
 export function setRuntimeMaterialOverrides(pairs: Array<{ requestedCode: string; existingCode: string }>) {
