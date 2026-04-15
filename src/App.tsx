@@ -3850,11 +3850,53 @@ export default function App() {
     if (prioritizedEntries.length === 0) return [];
 
     const lid = prioritizedEntries[0].order.line;
-    const orderedOrders = prioritizedEntries.map(entry => entry.order);
+    const stateRank = (key: 'direct' | 'prep' | 'wait') => {
+      if (key === 'direct') return 0;
+      if (key === 'prep') return 1;
+      return 2;
+    };
+    const sortByBestNext = <T extends typeof prioritizedEntries[number]>(
+      entries: T[],
+      initialReferenceOrder: Order | null
+    ) => {
+      const remaining = entries.slice();
+      const sorted: T[] = [];
+      let referenceOrder = initialReferenceOrder;
+
+      while (remaining.length > 0) {
+        remaining.sort((a, b) => {
+          const rankDiff = stateRank(a.plannerState.key) - stateRank(b.plannerState.key);
+          if (rankDiff !== 0) return rankDiff;
+
+          const aSwitches = a.plannerState.key === 'direct' ? 0 : getSwitchMaterials(referenceOrder, a.order, bunkers[lid] || []).length;
+          const bSwitches = b.plannerState.key === 'direct' ? 0 : getSwitchMaterials(referenceOrder, b.order, bunkers[lid] || []).length;
+          if (aSwitches !== bSwitches) return aSwitches - bSwitches;
+
+          const aTransition = a.plannerState.key === 'direct' ? 0 : getTransitionMinutes(lid, referenceOrder, a.order);
+          const bTransition = b.plannerState.key === 'direct' ? 0 : getTransitionMinutes(lid, referenceOrder, b.order);
+          if (aTransition !== bTransition) return aTransition - bTransition;
+
+          const aEta = etaToMins(getOrderLoadReferenceTime(a.order)) ?? Number.POSITIVE_INFINITY;
+          const bEta = etaToMins(getOrderLoadReferenceTime(b.order)) ?? Number.POSITIVE_INFINITY;
+          if (aEta !== bEta) return aEta - bEta;
+
+          return a.originalIndex - b.originalIndex;
+        });
+
+        const [next] = remaining.splice(0, 1);
+        sorted.push(next);
+        referenceOrder = next.order;
+      }
+
+      return sorted;
+    };
+    const runningEntry = lineEntries.find(entry => entry.order.status === 'running');
+    const sortedEntries = sortByBestNext(prioritizedEntries, runningEntry?.order || null);
+    const orderedOrders = sortedEntries.map(entry => entry.order);
     const starts = getScheduledStartsForLine(orderedOrders, lid);
     let cursorEnd: Date | null = null;
 
-    return prioritizedEntries.map((entry, index) => {
+    return sortedEntries.map((entry, index) => {
       const order = entry.order;
       const prevOrder = index > 0 ? orderedOrders[index - 1] : null;
       const scheduledStart = starts[index] || starts[0] || currentTime;
@@ -3881,10 +3923,10 @@ export default function App() {
         swMats,
         sw,
         duration,
-        plannerState: getPlannerOrderState(order, index, prioritizedEntries as unknown as ScheduledLineEntry[], nowMinutes)
+        plannerState: getPlannerOrderState(order, index, sortedEntries as unknown as ScheduledLineEntry[], nowMinutes)
       };
     });
-  }, [currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes]);
+  }, [currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, getOrderLoadReferenceTime]);
 
   const plannerDisplayEntriesByLine = useMemo(() => ({
     1: getPlannerDisplayEntries(lineTimelineByLine[1]),
@@ -4083,12 +4125,53 @@ export default function App() {
       if (prioritizedEntries.length === 0) return [];
 
       const lid = prioritizedEntries[0].order.line;
-      const orderedOrders = prioritizedEntries.map(entry => entry.order);
+      const stateRank = (key: 'direct' | 'prep' | 'wait') => {
+        if (key === 'direct') return 0;
+        if (key === 'prep') return 1;
+        return 2;
+      };
+      const sortByBestNext = <T extends typeof prioritizedEntries[number]>(
+        entries: T[],
+        initialReferenceOrder: Order | null
+      ) => {
+        const remaining = entries.slice();
+        const sorted: T[] = [];
+        let referenceOrder = initialReferenceOrder;
+
+        while (remaining.length > 0) {
+          remaining.sort((a, b) => {
+            const rankDiff = stateRank(a.operatorState.key) - stateRank(b.operatorState.key);
+            if (rankDiff !== 0) return rankDiff;
+
+            const aSwitches = a.operatorState.key === 'direct' ? 0 : getSwitchMaterials(referenceOrder, a.order, bunkers[lid] || []).length;
+            const bSwitches = b.operatorState.key === 'direct' ? 0 : getSwitchMaterials(referenceOrder, b.order, bunkers[lid] || []).length;
+            if (aSwitches !== bSwitches) return aSwitches - bSwitches;
+
+            const aTransition = a.operatorState.key === 'direct' ? 0 : getTransitionMinutes(lid, referenceOrder, a.order);
+            const bTransition = b.operatorState.key === 'direct' ? 0 : getTransitionMinutes(lid, referenceOrder, b.order);
+            if (aTransition !== bTransition) return aTransition - bTransition;
+
+            const aEta = etaToMins(getOrderLoadReferenceTime(a.order)) ?? Number.POSITIVE_INFINITY;
+            const bEta = etaToMins(getOrderLoadReferenceTime(b.order)) ?? Number.POSITIVE_INFINITY;
+            if (aEta !== bEta) return aEta - bEta;
+
+            return a.originalIndex - b.originalIndex;
+          });
+
+          const [next] = remaining.splice(0, 1);
+          sorted.push(next);
+          referenceOrder = next.order;
+        }
+
+        return sorted;
+      };
+      const sortedEntries = sortByBestNext(prioritizedEntries, displayedCurrentOrder || null);
+      const orderedOrders = sortedEntries.map(entry => entry.order);
       const starts = getScheduledStartsForLine(orderedOrders, lid);
 
       let cursorEnd: Date | null = null;
-      if (!displayedCurrentOrder && prioritizedEntries.length > 0) {
-        const firstOrder = prioritizedEntries[0].order;
+      if (!displayedCurrentOrder && sortedEntries.length > 0) {
+        const firstOrder = sortedEntries[0].order;
         const firstPrevOrder = null;
         const firstStartTime = starts[0];
         const firstTransitionMinutes = getTransitionMinutes(lid, firstPrevOrder, firstOrder);
@@ -4098,7 +4181,7 @@ export default function App() {
           cursorEnd = new Date(nowTime - firstTransitionMinutes * 60000);
         }
       }
-      return prioritizedEntries.map((entry, index) => {
+      return sortedEntries.map((entry, index) => {
         const order = entry.order;
         const prevOrder = index > 0 ? orderedOrders[index - 1] : null;
         const scheduledStart = starts[index] || starts[0] || currentTime;
@@ -4147,7 +4230,7 @@ export default function App() {
           operatorState
         };
       });
-    }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd]);
+    }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime]);
 
   const nextOperatorOrder = useMemo(
     () => operatorDisplayEntries[0]?.order || null,
@@ -4699,18 +4782,18 @@ export default function App() {
               </span>
             )}
           </button>
-        </nav>
-
-        <div className="ml-auto flex items-center gap-3">
           <button
             type="button"
+            className="nt"
             onClick={() => setShowAppInfo(true)}
-            className="h-9 w-9 rounded-full border border-gray-200 bg-white text-gray-500 hover:text-blue-600 hover:border-blue-200 hover:bg-blue-50 flex items-center justify-center transition-colors"
             title="Informatie over deze planning"
             aria-label="Informatie over deze planning"
           >
-            <Info size={18} />
+            <Info size={16} /> Info
           </button>
+        </nav>
+
+        <div className="ml-auto flex items-center gap-3">
           <div className="flex items-center gap-2 px-2.5 py-1.5 border border-gray-200 rounded-full bg-gray-50">
             <div className="text-[11px] text-gray-400 uppercase tracking-wider">Gedraaid</div>
             <div className="text-[13px] font-bold text-grd">{totalCompletedM3.toFixed(1)} m3</div>
