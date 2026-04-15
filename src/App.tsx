@@ -2931,7 +2931,6 @@ export default function App() {
           const preparationContinuityBonus = getPreparationContinuityBonus(plan, order, lid);
           const continuationBonus = getContinuationPotential(lid, plan, order, pool);
           const deferredBulkPenalty = order.pkg === 'bulk' && effPrio > 1 ? 50000 : 0;
-          const holdLoadTimeBonus = order.status === 'arrived' && order.holdLoadTime ? 80000 : 0;
           const starterBulkDelayPenalty =
             !current &&
             hasFlexibleEarlyStarter &&
@@ -2990,13 +2989,18 @@ export default function App() {
           let urgencyBonus = 0;
           let etaCanBreakLargeBlock = false;
           let safeSlackBonus = 0;
+          let futureBulkLoadPenalty = 0;
+          let holdLoadTimeBonus = 0;
           if (hasEta) {
-            const latestAllowed = etaMins! + (order.status === 'arrived' ? 30 : config[lid].maxWait);
-            const earliestAllowed = etaMins!;
+            const earliestAllowed = planCursor.baseDayStart + etaMins!;
+            const latestAllowed = earliestAllowed + (order.status === 'arrived' ? 30 : config[lid].maxWait);
             const earlySlack = candidateProdStartMinutes - earliestAllowed;
             const slack = latestAllowed - candidateProdStartMinutes;
             if (earlySlack < 0) {
               loadWindowPenalty = 200000 + (Math.abs(earlySlack) * 5000);
+              if (order.pkg === 'bulk') {
+                futureBulkLoadPenalty = 220000 + (Math.abs(earlySlack) * 6500);
+              }
             } else if (slack < 0) {
               loadWindowPenalty = 200000 + (Math.abs(slack) * 5000);
             } else {
@@ -3004,6 +3008,9 @@ export default function App() {
               etaCanBreakLargeBlock = slack <= 25;
               safeSlackBonus = slack >= 45 ? 15000 : slack >= 30 ? 7000 : 0;
             }
+          }
+          if (order.status === 'arrived' && order.holdLoadTime) {
+            holdLoadTimeBonus = futureBulkLoadPenalty > 0 ? 12000 : 80000;
           }
 
           const breakLargeBlockPenalty = !isLargeOrder && trailingLargeStreak >= 2 && !etaCanBreakLargeBlock ? 80000 : 0;
@@ -3014,6 +3021,7 @@ export default function App() {
             score =
               effPrio * 100000 +
               deferredBulkPenalty +
+              futureBulkLoadPenalty +
               0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
@@ -3041,6 +3049,7 @@ export default function App() {
             score =
               effPrio * 100000 +
               deferredBulkPenalty +
+              futureBulkLoadPenalty +
               0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
@@ -3067,6 +3076,7 @@ export default function App() {
             score =
               effPrio * 100000 +
               deferredBulkPenalty +
+              futureBulkLoadPenalty +
               0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
@@ -3094,6 +3104,7 @@ export default function App() {
               fixedFirstBonus +
               effPrio * 100000 +
               deferredBulkPenalty +
+              futureBulkLoadPenalty +
               0 - holdLoadTimeBonus +
               starterBulkDelayPenalty +
               bagAfterBagPenalty -
@@ -4048,8 +4059,12 @@ export default function App() {
       let startTime = cursorEnd ? new Date(cursorEnd) : scheduledStart;
       let prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
       const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
-      if (heldLoadDateTime && prodStart.getTime() < heldLoadDateTime.getTime()) {
-        const shiftMs = heldLoadDateTime.getTime() - prodStart.getTime();
+      const bulkLoadDateTime = normalizePkg(order.pkg) === 'bulk'
+        ? getOrderLoadReferenceDateTime(order, prodStart)
+        : null;
+      const earliestLoadDateTime = heldLoadDateTime || bulkLoadDateTime;
+      if (earliestLoadDateTime && prodStart.getTime() < earliestLoadDateTime.getTime()) {
+        const shiftMs = earliestLoadDateTime.getTime() - prodStart.getTime();
         startTime = new Date(startTime.getTime() + shiftMs);
         prodStart = new Date(prodStart.getTime() + shiftMs);
       }
@@ -4346,8 +4361,12 @@ export default function App() {
           startTime = new Date(prodStart.getTime() - transitionMinutes * 60000);
         }
         const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
-        if (heldLoadDateTime && prodStart.getTime() < heldLoadDateTime.getTime()) {
-          const shiftMs = heldLoadDateTime.getTime() - prodStart.getTime();
+        const bulkLoadDateTime = normalizePkg(order.pkg) === 'bulk'
+          ? getOrderLoadReferenceDateTime(order, prodStart)
+          : null;
+        const earliestLoadDateTime = heldLoadDateTime || bulkLoadDateTime;
+        if (earliestLoadDateTime && prodStart.getTime() < earliestLoadDateTime.getTime()) {
+          const shiftMs = earliestLoadDateTime.getTime() - prodStart.getTime();
           startTime = new Date(startTime.getTime() + shiftMs);
           prodStart = new Date(prodStart.getTime() + shiftMs);
         }
