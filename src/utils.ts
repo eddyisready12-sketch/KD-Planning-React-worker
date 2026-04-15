@@ -3,7 +3,7 @@ import { LINES, DEFAULT_CFG } from './constants';
 
 export function ev(o: Order): number {
   const pkg = normalizePkg(o.pkg);
-  return (pkg === 'bale' || pkg === 'packaged' || pkg === 'bag') ? o.vol * 1.03 : o.vol;
+  return (pkg === 'bale' || pkg === 'packaged') ? o.vol * 1.03 : o.vol;
 }
 
 export function rt(o: Order, speed: number): number {
