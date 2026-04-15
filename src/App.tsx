@@ -1708,15 +1708,18 @@ export default function App() {
     localStorage.setItem('kd_storingen', JSON.stringify(storingen));
   }, [storingen]);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [planningTime, setPlanningTime] = useState(new Date());
 
   // Tickers
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    const planningTimer = setInterval(() => setPlanningTime(new Date()), 15000);
     const progTimer = setInterval(() => {
       setProgress(p => Math.min(p + 0.06, 99));
     }, 3000);
     return () => {
       clearInterval(timer);
+      clearInterval(planningTimer);
       clearInterval(progTimer);
     };
   }, []);
@@ -2334,8 +2337,8 @@ export default function App() {
     return Array.from(merged.values());
   }, [planningMaterials, calibrationMaterials]);
 
-  const getEffectivePriority = (order: Order): 1 | 2 | 3 => {
-    const nowMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
+  const getEffectivePriority = useCallback((order: Order): 1 | 2 | 3 => {
+    const nowMinutes = planningTime.getHours() * 60 + planningTime.getMinutes();
     const nowOperationalMinutes = nowMinutes - (5 * 60);
     const pkg = normalizePkg(order.pkg);
     if (priorityOnePackages.has(pkg)) return 1;
@@ -2347,7 +2350,7 @@ export default function App() {
       return order.status === 'arrived' && loadWindowOpen ? 1 : 2;
     }
     return [1, 2, 3].includes(order.prio) ? order.prio : 2;
-  };
+  }, [getOrderLoadReferenceTime, planningTime, priorityOnePackages]);
 
   const getLoadHoldSequenceRank = useCallback((order: Order): number => {
     const normalizedEta = normalizeEta(order.eta);
@@ -3214,7 +3217,7 @@ export default function App() {
           const starts = schedule[lid];
           let cursorEnd: Date | null = null;
           res[lid] = lineOrders.map((order, index) => {
-            const scheduledStart = starts[index] || starts[0] || currentTime;
+            const scheduledStart = starts[index] || starts[0] || planningTime;
             const prevOrder = index > 0 ? lineOrders[index - 1] : null;
             const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
             const sw = swMats.length;
@@ -3242,7 +3245,7 @@ export default function App() {
           });
       });
     return res;
-  }, [lineIds, lineOrdersByLine, schedule, bunkers, config, currentTime, getTransitionMinutes]);
+  }, [lineIds, lineOrdersByLine, schedule, bunkers, config, planningTime, getTransitionMinutes]);
 
   const lineTimelineEntryByOrderId = useMemo(() => {
     const res: Record<LineId, Map<number, ScheduledLineEntry>> = { 1: new Map(), 2: new Map(), 3: new Map() };
@@ -3842,7 +3845,7 @@ export default function App() {
   };
 
   const getPlannerDisplayEntries = useCallback((lineEntries: ScheduledLineEntry[]) => {
-    const nowMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
+    const nowMinutes = planningTime.getHours() * 60 + planningTime.getMinutes();
     const prioritizedEntries = lineEntries
       .filter(entry => entry.order.status === 'planned' || entry.order.status === 'arrived')
       .map((entry, index) => ({
@@ -3902,7 +3905,7 @@ export default function App() {
     return sortedEntries.map((entry, index) => {
       const order = entry.order;
       const prevOrder = index > 0 ? orderedOrders[index - 1] : null;
-      const scheduledStart = starts[index] || starts[0] || currentTime;
+      const scheduledStart = starts[index] || starts[0] || planningTime;
       const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
       const sw = swMats.length;
       const duration = rt(order, LINES[lid].speed);
@@ -3929,7 +3932,7 @@ export default function App() {
         plannerState: getPlannerOrderState(order, index, sortedEntries as unknown as ScheduledLineEntry[], nowMinutes)
       };
     });
-  }, [currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, getOrderLoadReferenceTime]);
+  }, [planningTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, getOrderLoadReferenceTime]);
 
   const plannerDisplayEntriesByLine = useMemo(() => ({
     1: getPlannerDisplayEntries(lineTimelineByLine[1]),
@@ -3948,17 +3951,17 @@ export default function App() {
   }, [lineIds, plannerDisplayEntriesByLine]);
 
   const plannerWeekDates = useMemo(() => {
-    const anchor = plannerVisibleDates[0] || currentTime;
+    const anchor = plannerVisibleDates[0] || planningTime;
     return getPlanningDateRange(anchor, plannerVisibleDates);
-  }, [plannerVisibleDates, currentTime]);
+  }, [plannerVisibleDates, planningTime]);
 
   useEffect(() => {
     const hasSelectedDate = plannerVisibleDates.some(date => formatLocalDate(date) === plannerSelectedDate);
     if (!hasSelectedDate) {
-      const nextVisibleDate = plannerVisibleDates[0] ? formatLocalDate(plannerVisibleDates[0]) : formatLocalDate(currentTime);
+      const nextVisibleDate = plannerVisibleDates[0] ? formatLocalDate(plannerVisibleDates[0]) : formatLocalDate(planningTime);
       setPlannerSelectedDate(nextVisibleDate);
     }
-  }, [plannerVisibleDates, plannerSelectedDate, currentTime]);
+  }, [plannerVisibleDates, plannerSelectedDate, planningTime]);
 
   const filteredPlannerDisplayEntriesByLine = useMemo(() => {
     const isVisibleOnSelectedDate = (entry: ScheduledLineEntry) => {
@@ -4117,7 +4120,7 @@ export default function App() {
   const visiblePlannerTriggers = activePlannerTriggerRows;
 
   const operatorDisplayEntries = useMemo(() => {
-      const nowMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
+      const nowMinutes = planningTime.getHours() * 60 + planningTime.getMinutes();
   
       const prioritizedEntries = plannedEntries
         .map((entry, index) => ({
@@ -4181,7 +4184,7 @@ export default function App() {
         const firstStartTime = starts[0];
         const firstTransitionMinutes = getTransitionMinutes(lid, firstPrevOrder, firstOrder);
         const firstBaseProdStart = new Date(firstStartTime.getTime() + firstTransitionMinutes * 60000);
-        const nowTime = currentTime.getTime();
+        const nowTime = planningTime.getTime();
         if (firstBaseProdStart.getTime() < nowTime) {
           cursorEnd = new Date(nowTime - firstTransitionMinutes * 60000);
         }
@@ -4189,7 +4192,7 @@ export default function App() {
       return sortedEntries.map((entry, index) => {
         const order = entry.order;
         const prevOrder = index > 0 ? orderedOrders[index - 1] : null;
-        const scheduledStart = starts[index] || starts[0] || currentTime;
+        const scheduledStart = starts[index] || starts[0] || planningTime;
         const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
         const sw = swMats.length;
         const duration = rt(order, LINES[lid].speed);
@@ -4214,7 +4217,7 @@ export default function App() {
           operatorState.key === 'direct' &&
           normalizePkg(order.pkg) === 'bulk' &&
           loadDateTime &&
-          currentTime.getTime() < loadDateTime.getTime()
+          planningTime.getTime() < loadDateTime.getTime()
         ) {
           operatorState = {
             label: 'Wachten',
@@ -4235,7 +4238,7 @@ export default function App() {
           operatorState
         };
       });
-    }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime, manualOperatorOrderLines]);
+    }, [plannedEntries, planningTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime, manualOperatorOrderLines]);
 
   const nextOperatorOrder = useMemo(
     () => operatorDisplayEntries[0]?.order || null,
