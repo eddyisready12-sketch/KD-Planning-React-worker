@@ -15,7 +15,7 @@ import { supabase } from './services/supabaseClient';
 import { 
   LayoutDashboard, ClipboardList, Database, Settings, Bell, 
   Truck as TruckIcon, CheckCircle2, Play, X, ChevronUp, ChevronDown,
-  Wrench, AlertTriangle, Check, Clock, Pencil, RefreshCw, Package, Shuffle
+  Wrench, AlertTriangle, Check, Clock, Pencil, RefreshCw, Package, Shuffle, Info
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -341,6 +341,7 @@ export default function App() {
   const [plannerTriggers, setPlannerTriggers] = useState<PlannerTrigger[]>([]);
   const [newDriverName, setNewDriverName] = useState('');
   const [showDriverForm, setShowDriverForm] = useState(false);
+  const [showAppInfo, setShowAppInfo] = useState(false);
   const [newDriverForm, setNewDriverForm] = useState<DriverFormState>(EMPTY_DRIVER_FORM);
   const [driverSyncDebug, setDriverSyncDebug] = useState('');
   const [isSavingDriver, setIsSavingDriver] = useState(false);
@@ -4701,6 +4702,15 @@ export default function App() {
         </nav>
 
         <div className="ml-auto flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setShowAppInfo(true)}
+            className="h-9 w-9 rounded-full border border-gray-200 bg-white text-gray-500 hover:text-blue-600 hover:border-blue-200 hover:bg-blue-50 flex items-center justify-center transition-colors"
+            title="Informatie over deze planning"
+            aria-label="Informatie over deze planning"
+          >
+            <Info size={18} />
+          </button>
           <div className="flex items-center gap-2 px-2.5 py-1.5 border border-gray-200 rounded-full bg-gray-50">
             <div className="text-[11px] text-gray-400 uppercase tracking-wider">Gedraaid</div>
             <div className="text-[13px] font-bold text-grd">{totalCompletedM3.toFixed(1)} m3</div>
@@ -4710,6 +4720,98 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      <AnimatePresence>
+        {showAppInfo && (
+          <motion.div
+            className="fixed inset-0 bg-gray-900/45 backdrop-blur-sm z-50 flex items-center justify-center p-5"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setShowAppInfo(false)}
+          >
+            <motion.div
+              className="w-full max-w-3xl max-h-[86vh] overflow-y-auto bg-white rounded-3xl shadow-2xl border border-gray-100"
+              initial={{ opacity: 0, y: 16, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.98 }}
+              transition={{ duration: 0.18 }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="sticky top-0 bg-white/95 backdrop-blur border-b border-gray-100 px-7 py-5 flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-xs font-extrabold uppercase tracking-[0.18em] text-blue-500 mb-1">Informatie</div>
+                  <h2 className="text-2xl font-black text-gray-900">Wat doet deze planning?</h2>
+                  <p className="text-sm text-gray-500 mt-1">Korte uitleg voor operators en planners.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAppInfo(false)}
+                  className="h-10 w-10 rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-700 flex items-center justify-center"
+                  aria-label="Sluit informatie"
+                >
+                  <X size={22} />
+                </button>
+              </div>
+
+              <div className="px-7 py-6 space-y-5 text-gray-700">
+                <section className="rounded-2xl border border-blue-100 bg-blue-50/60 p-5">
+                  <h3 className="font-extrabold text-gray-900 mb-2">Doel</h3>
+                  <p className="leading-relaxed">
+                    De app houdt de productieplanning centraal bij in Supabase. Operators zien wat direct kan starten,
+                    planners zien de lijnplanning, chauffeurs, vrachtwagenritten en afgeronde orders. Wijzigingen zoals
+                    starten, gereed melden, bunkerstatus en chauffeurs worden gedeeld tussen werkplekken.
+                  </p>
+                </section>
+
+                <section className="grid md:grid-cols-2 gap-4">
+                  <div className="rounded-2xl border border-gray-200 p-5">
+                    <h3 className="font-extrabold text-gray-900 mb-2">Volgorde en prioriteit</h3>
+                    <p className="leading-relaxed">
+                      Verpakte orders krijgen voorrang: BAL blijft factor 1.03, BAG gebruikt factor 1.00. Bulk wordt
+                      standaard pas gepland met een laadtijd. Zodra een bulkchauffeur gearriveerd is en een laadtijd heeft,
+                      wordt die als prio-order behandeld.
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-gray-200 p-5">
+                    <h3 className="font-extrabold text-gray-900 mb-2">Tijden</h3>
+                    <p className="leading-relaxed">
+                      De dag start met voorbereiding van 05:00 tot 05:15. De eerste order start om 05:15. Bij lopende
+                      orders gebruikt de planner de actuele operatorstatus: de eindtijd van de actieve order bepaalt de
+                      volgende beschikbare start, inclusief benodigde voorbereiding of bunkerwissel.
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-gray-200 p-5">
+                    <h3 className="font-extrabold text-gray-900 mb-2">Bunkers en kalibraties</h3>
+                    <p className="leading-relaxed">
+                      Een order kan alleen goed worden gepland als de grondstoffen op de lijn bekend en gekalibreerd zijn.
+                      De app adviseert bunkerwissels en voorkomt dat een order naar een lijn gaat waar de benodigde
+                      kalibratie ontbreekt.
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-gray-200 p-5">
+                    <h3 className="font-extrabold text-gray-900 mb-2">Speciale regels</h3>
+                    <p className="leading-relaxed">
+                      Fractie 1 en Fractie 2 mogen samen als mix in een bunker staan. Chauffeurs kunnen centraal beheerd
+                      worden en bij vrachtwagenritten kan een laadtijd vastgehouden worden zodat vroege bulkorders niet
+                      onnodig worden weggedrukt.
+                    </p>
+                  </div>
+                </section>
+
+                <section className="rounded-2xl border border-amber-100 bg-amber-50/70 p-5">
+                  <h3 className="font-extrabold text-amber-950 mb-2">Als iets niet klopt</h3>
+                  <p className="leading-relaxed text-amber-950/80">
+                    Controleer eerst de orderdatum, laadtijd, lijn, bunkerinhoud en kalibratie. Gebruik daarna eventueel
+                    herberekenen of auto-sync. Als Supabase tijdelijk traag is, blijft de app zoveel mogelijk lokaal
+                    bruikbaar en synchroniseert hij later opnieuw.
+                  </p>
+                </section>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <main className="flex-1 overflow-y-auto p-7 min-h-0">
         <AnimatePresence mode="wait">
