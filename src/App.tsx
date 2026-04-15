@@ -6006,8 +6006,12 @@ export default function App() {
                             if (runningEnd && runningOrder && runningIndex >= 0) {
                               let cursor = runningEnd;
                               let previousOrder: Order | null = runningOrder;
-                              plannerDisplayTimeline.forEach(entry => {
-                                const transitionMinutes = getTransitionMinutes(lid, previousOrder, entry.order);
+                              plannerDisplayTimeline.forEach((entry, indexAfterRunning) => {
+                                // Keep the planner line view equal to the operator dashboard:
+                                // the first direct order after a running order starts at the running end.
+                                const transitionMinutes = indexAfterRunning === 0 && entry.plannerState?.key === 'direct'
+                                  ? 0
+                                  : getTransitionMinutes(lid, previousOrder, entry.order);
                                 let start = new Date(cursor.getTime() + transitionMinutes * 60000);
                                 const heldLoadDateTime = getHeldLoadDateTime(entry.order, start);
                                 if (heldLoadDateTime && start.getTime() < heldLoadDateTime.getTime()) {
