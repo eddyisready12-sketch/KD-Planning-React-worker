@@ -591,18 +591,21 @@ export default function App() {
       const finalOrders = isSupabaseConfigured() ? await fetchOrdersFromSupabase() : importedOrders;
       mergeImportedOrdersIntoState(finalOrders);
       setDataSource(prev => ({ ...prev, loading: false, lastSync: new Date().toISOString() }));
+      const totalLoadedText = finalOrders.length !== importedOrders.length
+        ? ` (${finalOrders.length} totaal in app geladen)`
+        : '';
       setNotifications(prev => [{
         id: Date.now(),
         type: 'ok',
         icon: 'OK',
         titel: 'Orderbestand geïmporteerd',
-        tekst: `${finalOrders.length} orders geladen uit ${file.name}`,
+        tekst: `${importedOrders.length} orders geïmporteerd uit ${file.name}${totalLoadedText}`,
         lijn: null,
         orderNum: null,
         tijd: new Date(),
         gelezen: false
       }, ...prev]);
-      setCsvImportFeedback({ type: 'ok', text: `${finalOrders.length} orders succesvol geladen uit ${file.name}` });
+      setCsvImportFeedback({ type: 'ok', text: `${importedOrders.length} orders geïmporteerd uit ${file.name}${totalLoadedText}` });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Orderimport mislukt';
       setDataSource(prev => ({ ...prev, loading: false, error: errorMsg }));
