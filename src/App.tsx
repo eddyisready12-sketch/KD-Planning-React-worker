@@ -7750,19 +7750,17 @@ export default function App() {
         </AnimatePresence>
 
         {/* Order Detail Modal */}
-        <AnimatePresence>
-          {selectedOrderForDetail && (
-            <OrderDetailModal 
-              order={selectedOrderForDetail} 
-              onClose={() => setSelectedOrderForDetail(null)}
-              lineBunkers={bunkers[selectedOrderForDetail.line]}
-              lineConfig={config[selectedOrderForDetail.line]}
-              lineSpeed={LINES[selectedOrderForDetail.line].speed}
-              getLineMoveBlockers={(targetLine) => getLineMoveBlockers(selectedOrderForDetail, targetLine)}
-              onMoveOrderToLine={(targetLine) => handleMoveOrderToLine(selectedOrderForDetail.id, targetLine)}
-            />
-          )}
-        </AnimatePresence>
+        {selectedOrderForDetail && (
+          <OrderDetailModal 
+            order={selectedOrderForDetail} 
+            onClose={() => setSelectedOrderForDetail(null)}
+            lineBunkers={bunkers[selectedOrderForDetail.line]}
+            lineConfig={config[selectedOrderForDetail.line]}
+            lineSpeed={LINES[selectedOrderForDetail.line].speed}
+            getLineMoveBlockers={(targetLine) => getLineMoveBlockers(selectedOrderForDetail, targetLine)}
+            onMoveOrderToLine={(targetLine) => handleMoveOrderToLine(selectedOrderForDetail.id, targetLine)}
+          />
+        )}
       </main>
     </div>
   );
@@ -7933,6 +7931,7 @@ function OrderDetailModal({ order, onClose, lineBunkers, lineConfig, lineSpeed, 
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.95 }}
+        transition={{ duration: 0.08 }}
         className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto relative"
       >
         <button 
