@@ -1,4 +1,4 @@
-import { Bunker, LineId, Order, OrderComponent, PlannerTrigger, Storing } from '../types';
+import { BagVolumeRule, Bunker, LineId, Order, OrderComponent, PlannerTrigger, Storing } from '../types';
 import { normalizeEta, normalizePkg, parseNumber } from '../utils';
 import { supabase } from './supabaseClient';
 
@@ -80,9 +80,7 @@ type SharedAppStateRow = {
   workspace?: string | null;
   state_key?: string | null;
   state_type?: string | null;
-  state_value?: {
-    names?: string[];
-  } | string | null;
+  state_value?: Record<string, unknown> | unknown[] | string | null;
   updated_at?: string | null;
 };
 
@@ -1000,6 +998,73 @@ async function fetchSharedAppStateRow(stateKey: string): Promise<SharedAppStateR
   }
 
   return (rows?.[0] as SharedAppStateRow | undefined) || null;
+}
+
+async function writeSharedAppStateRow(stateKey: string, stateType: string, stateValue: unknown): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+
+  const existingRow = await fetchSharedAppStateRow(stateKey);
+  const payload = {
+    workspace: SUPABASE_WORKSPACE,
+    state_key: stateKey,
+    state_type: stateType,
+    state_value: stateValue,
+    updated_at: new Date().toISOString()
+  };
+
+  if (existingRow?.id) {
+    const { error } = await supabase
+      .from('shared_app_state')
+      .update(payload)
+      .eq('id', String(existingRow.id));
+    if (error) {
+      throw new Error(`Supabase update fout: ${error.message}`);
+    }
+  } else {
+    const { error } = await supabase
+      .from('shared_app_state')
+      .insert(payload);
+    if (error) {
+      throw new Error(`Supabase insert fout: ${error.message}`);
+    }
+  }
+}
+
+function sanitizeBagVolumeRules(raw: unknown): BagVolumeRule[] {
+  if (!Array.isArray(raw)) return [];
+
+  return raw.map((rule, index) => {
+    const item = (rule || {}) as Partial<BagVolumeRule>;
+    const codes = Array.isArray(item.codes)
+      ? item.codes.map(code => String(code || '').replace(/\D/g, '')).filter(Boolean)
+      : [];
+    const volumePerBag = parseNumber(item.volumePerBag);
+    const extraBags = parseNumber(item.extraBags);
+    return {
+      id: String(item.id || `bag_rule_${index + 1}`),
+      label: String(item.label || `BAG regel ${index + 1}`).trim(),
+      codes,
+      volumePerBag: Number.isFinite(volumePerBag) ? volumePerBag : 0,
+      extraBags: Number.isFinite(extraBags) ? extraBags : 0,
+      active: item.active !== false
+    };
+  }).filter(rule => rule.label.trim() && rule.codes.length > 0 && rule.volumePerBag > 0);
+}
+
+export async function fetchBagVolumeRulesFromSupabase(): Promise<BagVolumeRule[] | null> {
+  if (!isSupabaseConfigured()) return null;
+
+  const row = await fetchSharedAppStateRow('bag_volume_rules');
+  if (!row) return null;
+
+  return sanitizeBagVolumeRules(parseSharedAppStateValue(row.state_value));
+}
+
+export async function writeBagVolumeRulesToSupabase(rules: BagVolumeRule[]): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+
+  const cleaned = sanitizeBagVolumeRules(rules);
+  await writeSharedAppStateRow('bag_volume_rules', 'settings', cleaned);
 }
 
 export async function fetchPlannerRecalcLockFromSupabase(): Promise<PlannerRecalcLockState | null> {

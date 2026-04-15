@@ -118,3 +118,12 @@ export interface PlannerTrigger {
   actionName?: string;
   targetLine?: string;
 }
+
+export interface BagVolumeRule {
+  id: string;
+  label: string;
+  codes: string[];
+  volumePerBag: number;
+  extraBags: number;
+  active: boolean;
+}

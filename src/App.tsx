@@ -1,6 +1,6 @@
 ﻿import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
-  LineId, Order, Bunker, Melding, Storing, AppConfig, Truck, PlannerTrigger, OrderComponent 
+  LineId, Order, Bunker, Melding, Storing, AppConfig, Truck, PlannerTrigger, OrderComponent, BagVolumeRule
 } from './types';
 import { useRef, useDeferredValue } from 'react';
 import { 
@@ -9,8 +9,8 @@ import {
 import {
   fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, materialsMixCompatible, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides, FRACTION_MIX_MATERIAL_NAME, FRACTION_MIX_MATERIAL_CODE, isFractieMixMaterial
 } from './utils';
-import { fetchOrdersFromSheet, fetchBunkersFromSheet, importOrdersFromLocalFile, CalibrationMaterial } from './services/sheetService';
-import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriversFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, setDriverActiveInSupabase, upsertDriverInSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow, type SharedDriver } from './services/supabaseService';
+import { fetchOrdersFromSheet, fetchBunkersFromSheet, importOrdersFromLocalFile, DEFAULT_BAG_VOLUME_RULES, CalibrationMaterial } from './services/sheetService';
+import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBagVolumeRulesFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriversFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, setDriverActiveInSupabase, upsertDriverInSupabase, writeBagVolumeRulesToSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow, type SharedDriver } from './services/supabaseService';
 import { supabase } from './services/supabaseClient';
 import { 
   LayoutDashboard, ClipboardList, Database, Settings, Bell, 
@@ -92,6 +92,33 @@ const DEFAULT_PLANNER_TRIGGERS: PlannerTrigger[] = [
   { key: 'first_order_start_0515', label: 'Dagstart lijn', description: 'Voorbereiding loopt standaard van `05:00` tot `05:15`. De eerste order start vanaf `05:15`.', active: true, fieldName: 'planner', matchValue: 'first_order', actionName: 'first_order_start_0515', targetLine: 'all' },
   { key: 'material_override_0006141_over_0006142', label: 'Materiaalregel', description: '`Kokosgruis Gebufferd (0006141)` mag over `Kokosgruis gewassen (0006142)` zonder extra blokkade.', active: true, fieldName: 'material_override', matchValue: '0006141>0006142', actionName: 'allow_over_existing', targetLine: 'all' }
 ];
+
+function parseBagRuleCodesInput(value: string): string[] {
+  return Array.from(new Set(
+    String(value || '')
+      .split(/[,\s]+/)
+      .map(code => code.replace(/\D/g, ''))
+      .filter(Boolean)
+  ));
+}
+
+function parseBagRuleNumber(value: unknown): number {
+  const parsed = Number(String(value ?? '').replace(',', '.'));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function cleanBagVolumeRules(rules: BagVolumeRule[]): BagVolumeRule[] {
+  return rules
+    .map((rule, index) => ({
+      id: String(rule.id || `bag_rule_${index + 1}`),
+      label: String(rule.label || `BAG regel ${index + 1}`).trim(),
+      codes: parseBagRuleCodesInput((rule.codes || []).join(',')),
+      volumePerBag: parseBagRuleNumber(rule.volumePerBag),
+      extraBags: parseBagRuleNumber(rule.extraBags),
+      active: rule.active !== false
+    }))
+    .filter(rule => rule.label && rule.codes.length > 0 && rule.volumePerBag > 0);
+}
 
 function getOrderRefLabel(order: Pick<Order, 'num' | 'productionOrder'>): string {
   return order.productionOrder
@@ -383,6 +410,10 @@ export default function App() {
   const [isImportingCsv, setIsImportingCsv] = useState(false);
   const [csvImportFeedback, setCsvImportFeedback] = useState<{ type: 'ok' | 'error' | 'busy'; text: string } | null>(null);
   const [csvImportDate, setCsvImportDate] = useState(() => formatLocalDate(new Date()));
+  const [bagVolumeRules, setBagVolumeRules] = useState<BagVolumeRule[]>(DEFAULT_BAG_VOLUME_RULES);
+  const [bagVolumeRuleDrafts, setBagVolumeRuleDrafts] = useState<BagVolumeRule[]>(DEFAULT_BAG_VOLUME_RULES);
+  const [isSavingBagVolumeRules, setIsSavingBagVolumeRules] = useState(false);
+  const [bagVolumeRuleFeedback, setBagVolumeRuleFeedback] = useState<{ type: 'ok' | 'error' | 'busy'; text: string } | null>(null);
   const [orders, setOrders] = useState<Order[]>(() => {
     const saved = localStorage.getItem('kd_orders');
     return saved ? JSON.parse(saved) : [];
@@ -584,7 +615,7 @@ export default function App() {
     setCsvImportFeedback({ type: 'busy', text: `Bezig met importeren van ${file.name} voor ${csvImportDate}...` });
     setDataSource(prev => ({ ...prev, loading: true, error: null }));
     try {
-      const importedOrders = await importOrdersFromLocalFile(file, csvImportDate);
+      const importedOrders = await importOrdersFromLocalFile(file, csvImportDate, bagVolumeRules);
       if (isSupabaseConfigured() && importedOrders.length > 0) {
         await writeOrdersToSupabase(importedOrders, { preserveExistingSchedule: true });
       }
@@ -623,6 +654,56 @@ export default function App() {
       setCsvImportFeedback({ type: 'error', text: errorMsg });
     } finally {
       setIsImportingCsv(false);
+    }
+  };
+
+  const updateBagVolumeRuleDraft = (ruleId: string, patch: Partial<BagVolumeRule>) => {
+    setBagVolumeRuleDrafts(prev => prev.map(rule => (
+      rule.id === ruleId ? { ...rule, ...patch } : rule
+    )));
+  };
+
+  const addBagVolumeRuleDraft = () => {
+    setBagVolumeRuleDrafts(prev => [
+      ...prev,
+      {
+        id: `bag_rule_${Date.now()}`,
+        label: 'Nieuwe BAG regel',
+        codes: [],
+        volumePerBag: 0,
+        extraBags: 1,
+        active: true
+      }
+    ]);
+  };
+
+  const removeBagVolumeRuleDraft = (ruleId: string) => {
+    setBagVolumeRuleDrafts(prev => prev.filter(rule => rule.id !== ruleId));
+  };
+
+  const handleSaveBagVolumeRules = async () => {
+    const cleanedRules = cleanBagVolumeRules(bagVolumeRuleDrafts);
+    if (cleanedRules.length === 0) {
+      setBagVolumeRuleFeedback({ type: 'error', text: 'Vul minimaal 1 actieve BAG-regel met code en m3 per bigbag in.' });
+      return;
+    }
+
+    setIsSavingBagVolumeRules(true);
+    setBagVolumeRuleFeedback({ type: 'busy', text: 'BAG-regels opslaan...' });
+    try {
+      if (isSupabaseConfigured()) {
+        await writeBagVolumeRulesToSupabase(cleanedRules);
+      }
+      setBagVolumeRules(cleanedRules);
+      setBagVolumeRuleDrafts(cleanedRules);
+      setBagVolumeRuleFeedback({ type: 'ok', text: 'BAG-regels opgeslagen. Nieuwe imports gebruiken deze instellingen.' });
+    } catch (err) {
+      setBagVolumeRuleFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'BAG-regels opslaan mislukt'
+      });
+    } finally {
+      setIsSavingBagVolumeRules(false);
     }
   };
 
@@ -891,6 +972,25 @@ export default function App() {
     }
   }, []);
 
+  const refreshBagVolumeRulesFromSupabase = useCallback(async () => {
+    if (!isSupabaseConfigured()) {
+      setBagVolumeRules(DEFAULT_BAG_VOLUME_RULES);
+      setBagVolumeRuleDrafts(DEFAULT_BAG_VOLUME_RULES);
+      return;
+    }
+
+    try {
+      const remoteRules = await fetchBagVolumeRulesFromSupabase();
+      const nextRules = remoteRules && remoteRules.length > 0
+        ? remoteRules
+        : DEFAULT_BAG_VOLUME_RULES;
+      setBagVolumeRules(nextRules);
+      setBagVolumeRuleDrafts(nextRules);
+    } catch {
+      // keep current rules if Supabase settings refresh fails
+    }
+  }, []);
+
   const activePlannerTriggerRows = useMemo(
     () => (plannerTriggers.length > 0 ? plannerTriggers : DEFAULT_PLANNER_TRIGGERS).filter(trigger => trigger.active !== false),
     [plannerTriggers]
@@ -954,7 +1054,8 @@ export default function App() {
     laadOrders();
     laadKalibratie();
     refreshPlannerTriggersFromSupabase();
-  }, [refreshPlannerTriggersFromSupabase]);
+    refreshBagVolumeRulesFromSupabase();
+  }, [refreshPlannerTriggersFromSupabase, refreshBagVolumeRulesFromSupabase]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -1025,6 +1126,7 @@ export default function App() {
         () => {
           void refreshPlannedOrderIdsFromSupabase();
           void refreshPlannerRecalcLockFromSupabase();
+          void refreshBagVolumeRulesFromSupabase();
         }
       )
       .subscribe();
@@ -1032,7 +1134,7 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [refreshPlannedOrderIdsFromSupabase, refreshPlannerRecalcLockFromSupabase]);
+  }, [refreshPlannedOrderIdsFromSupabase, refreshPlannerRecalcLockFromSupabase, refreshBagVolumeRulesFromSupabase]);
 
   useEffect(() => {
     if (!isSupabaseConfigured()) return;
@@ -7268,6 +7370,122 @@ export default function App() {
                       </div>
                     ))}
                   </div>
+                </div>
+
+                <div className="bg-white border border-gray-200 rounded-lg p-5 mb-4">
+                  <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 mb-4">
+                    <div>
+                      <h2 className="text-sm font-bold mb-1">BAG volume-regels</h2>
+                      <div className="text-xs text-gray-500 max-w-3xl">
+                        Gebruikt bij lokale CSV/XLS/XLSX import. Voor `BAG` zoekt de app de code in `Item / recept` en rekent dan: `(gepland aantal + extra bigbags) x m3 per bigbag`.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-sm whitespace-nowrap"
+                      onClick={addBagVolumeRuleDraft}
+                      disabled={isSavingBagVolumeRules}
+                    >
+                      + Regel
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    {bagVolumeRuleDrafts.map(rule => (
+                      <div
+                        key={rule.id}
+                        className="grid grid-cols-1 md:grid-cols-[1.1fr_1fr_0.7fr_0.7fr_auto] gap-3 rounded-xl border border-gray-100 bg-gray-50/60 p-3"
+                      >
+                        <label className="block">
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-gray-400">Naam</span>
+                          <input
+                            type="text"
+                            className="fi mt-1"
+                            value={rule.label}
+                            onChange={(e) => updateBagVolumeRuleDraft(rule.id, { label: e.target.value })}
+                            disabled={isSavingBagVolumeRules}
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-gray-400">Codes in item/recept</span>
+                          <input
+                            type="text"
+                            className="fi mt-1"
+                            value={(rule.codes || []).join(', ')}
+                            placeholder="Bijv. 150, 152"
+                            onChange={(e) => updateBagVolumeRuleDraft(rule.id, { codes: parseBagRuleCodesInput(e.target.value) })}
+                            disabled={isSavingBagVolumeRules}
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-gray-400">M3 per bag</span>
+                          <input
+                            type="number"
+                            className="fi mt-1"
+                            step="0.1"
+                            value={rule.volumePerBag}
+                            onChange={(e) => updateBagVolumeRuleDraft(rule.id, { volumePerBag: parseBagRuleNumber(e.target.value) })}
+                            disabled={isSavingBagVolumeRules}
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-gray-400">Extra bags</span>
+                          <input
+                            type="number"
+                            className="fi mt-1"
+                            step="1"
+                            value={rule.extraBags}
+                            onChange={(e) => updateBagVolumeRuleDraft(rule.id, { extraBags: parseBagRuleNumber(e.target.value) })}
+                            disabled={isSavingBagVolumeRules}
+                          />
+                        </label>
+                        <div className="flex items-end gap-2">
+                          <label className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600">
+                            <input
+                              type="checkbox"
+                              checked={rule.active !== false}
+                              onChange={(e) => updateBagVolumeRuleDraft(rule.id, { active: e.target.checked })}
+                              disabled={isSavingBagVolumeRules}
+                            />
+                            Actief
+                          </label>
+                          <button
+                            type="button"
+                            className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs font-semibold text-red-600"
+                            onClick={() => removeBagVolumeRuleDraft(rule.id)}
+                            disabled={isSavingBagVolumeRules || bagVolumeRuleDrafts.length <= 1}
+                          >
+                            Verwijder
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div className="text-[11px] text-gray-400">
+                      Standaard: codes 150/152 = +1 x 1.7 m3, codes 250/251/252 = +1 x 2.7 m3.
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-p btn-sm whitespace-nowrap"
+                      onClick={handleSaveBagVolumeRules}
+                      disabled={isSavingBagVolumeRules}
+                    >
+                      {isSavingBagVolumeRules ? 'Opslaan...' : 'BAG-regels opslaan'}
+                    </button>
+                  </div>
+                  {bagVolumeRuleFeedback && (
+                    <div className={`mt-3 text-[11px] font-medium ${
+                      bagVolumeRuleFeedback.type === 'ok'
+                        ? 'text-green-600'
+                        : bagVolumeRuleFeedback.type === 'error'
+                          ? 'text-red-600'
+                          : 'text-blue-600'
+                    }`}>
+                      {bagVolumeRuleFeedback.text}
+                    </div>
+                  )}
                 </div>
 
                 <div className="bg-white border border-gray-200 rounded-lg p-5 mb-4">

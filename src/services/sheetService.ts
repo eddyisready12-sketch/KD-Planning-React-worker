@@ -1,4 +1,4 @@
-import { Order, LineId, OrderComponent, Bunker } from '../types';
+import { Order, LineId, OrderComponent, Bunker, BagVolumeRule } from '../types';
 import { normalizeEta, normalizePkg, parseNumber, materialCodesEquivalent, normalizeMaterialCode } from '../utils';
 
 interface GvizCell {
@@ -20,6 +20,25 @@ interface GvizResponse {
   table: GvizTable;
   errors?: { message: string; detailed_message?: string }[];
 }
+
+export const DEFAULT_BAG_VOLUME_RULES: BagVolumeRule[] = [
+  {
+    id: 'bag_150_152',
+    label: 'BAG 150/152',
+    codes: ['150', '152'],
+    volumePerBag: 1.7,
+    extraBags: 1,
+    active: true
+  },
+  {
+    id: 'bag_250_251_252',
+    label: 'BAG 250/251/252',
+    codes: ['250', '251', '252'],
+    volumePerBag: 2.7,
+    extraBags: 1,
+    active: true
+  }
+];
 
 function stableOrderHash(key: string): number {
   return Math.abs(key.split('').reduce((a, b) => {
@@ -83,6 +102,46 @@ function getColumnIndex(headers: string[], aliases: string[]): number {
 function parseBooleanLike(value: string): boolean {
   const normalized = String(value || '').trim().toLowerCase();
   return ['1', 'true', 'waar', 'yes', 'ja', 'y', 'x'].includes(normalized);
+}
+
+function normalizeBagRuleCode(code: string): string {
+  return String(code || '').replace(/\D/g, '');
+}
+
+function findBagVolumeRule(recipe: string, rules: BagVolumeRule[] = DEFAULT_BAG_VOLUME_RULES): BagVolumeRule | null {
+  const recipeDigits = String(recipe || '').replace(/\D/g, '');
+  if (!recipeDigits) return null;
+
+  return rules.find(rule => {
+    if (rule.active === false) return false;
+    return (rule.codes || []).some(code => {
+      const normalizedCode = normalizeBagRuleCode(code);
+      return normalizedCode.length > 0 && recipeDigits.includes(normalizedCode);
+    });
+  }) || null;
+}
+
+function calculateImportedVolume(
+  pkg: Order['pkg'],
+  recipe: string,
+  plannedQtyRaw: string,
+  plannedCountRaw: string,
+  fallbackVolRaw: string,
+  bagVolumeRules: BagVolumeRule[] = DEFAULT_BAG_VOLUME_RULES
+): number {
+  const plannedQty = parseNumber(plannedQtyRaw);
+  const defaultVolume = plannedQty > 0 ? plannedQty : parseNumber(fallbackVolRaw);
+
+  if (pkg !== 'bag') return defaultVolume;
+
+  const plannedCount = parseNumber(plannedCountRaw);
+  if (!(plannedCount > 0)) return defaultVolume;
+
+  const rule = findBagVolumeRule(recipe, bagVolumeRules);
+  if (!rule || !(Number(rule.volumePerBag) > 0)) return defaultVolume;
+
+  const extraBags = Number.isFinite(Number(rule.extraBags)) ? Number(rule.extraBags) : 0;
+  return Math.round((plannedCount + extraBags) * Number(rule.volumePerBag) * 10) / 10;
 }
 
 function normalizeSheetDate(value: string): string {
@@ -230,7 +289,8 @@ function buildOrdersFromTableRows(
   rawHeaders: string[],
   rows: string[][],
   fallbackDate: string | undefined,
-  idOffset: number
+  idOffset: number,
+  bagVolumeRules: BagVolumeRule[] = DEFAULT_BAG_VOLUME_RULES
 ): Order[] {
   const indices: Record<string, number> = {};
   Object.entries(HEADER_MAP).forEach(([key, aliases]) => {
@@ -243,7 +303,7 @@ function buildOrdersFromTableRows(
       if (colIdx === undefined || colIdx === -1) return '';
       return String(values[colIdx] ?? '').trim();
     };
-    const order = buildOrderFromValues(getValue, undefined, fallbackDate);
+    const order = buildOrderFromValues(getValue, undefined, fallbackDate, bagVolumeRules);
     if (order) {
       order.id = idOffset + idx;
     }
@@ -264,7 +324,8 @@ function normalizeImportedStatus(value: string): Order['status'] {
 function buildOrderFromValues(
   getValue: (key: string) => string,
   fallbackLine?: LineId,
-  fallbackDate?: string
+  fallbackDate?: string,
+  bagVolumeRules: BagVolumeRule[] = DEFAULT_BAG_VOLUME_RULES
 ): Order | null {
   const recipe = getValue('recipe');
   const orderNum = getValue('orderNum');
@@ -274,8 +335,15 @@ function buildOrderFromValues(
   const rawLine = getValue('line');
   const lineVal = parseInt(rawLine.replace(/[^0-9]/g, ''), 10);
   const line: LineId = ([1, 2, 3].includes(lineVal) ? lineVal : (fallbackLine || 1)) as LineId;
-  const plannedQty = parseNumber(getValue('plannedQty'));
-  const vol = plannedQty > 0 ? plannedQty : parseNumber(getValue('vol'));
+  const pkg = inferPkgFromImportedFields(getValue('pkg'), getValue('productName'));
+  const vol = calculateImportedVolume(
+    pkg,
+    recipe,
+    getValue('plannedQty'),
+    getValue('plannedCount'),
+    getValue('vol'),
+    bagVolumeRules
+  );
   const ratio = parseNumber(getValue('ratio'));
 
   const component: OrderComponent | null = getValue('componentName') || getValue('componentCode')
@@ -287,7 +355,6 @@ function buildOrderFromValues(
       }
     : null;
 
-  const pkg = inferPkgFromImportedFields(getValue('pkg'), getValue('productName'));
   const rawStatus = getValue('status');
   const normalizedStatus = normalizeImportedStatus(rawStatus);
   const prio = pkg !== 'bulk' ? 1 : (parseInt(getValue('prio'), 10) || 2);
@@ -443,7 +510,11 @@ export async function fetchOrdersFromSheet(url: string): Promise<Order[]> {
   });
 }
 
-export async function importOrdersFromCsvFile(file: File, fallbackDate?: string): Promise<Order[]> {
+export async function importOrdersFromCsvFile(
+  file: File,
+  fallbackDate?: string,
+  bagVolumeRules: BagVolumeRule[] = DEFAULT_BAG_VOLUME_RULES
+): Promise<Order[]> {
   const text = await file.text();
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(line => line.trim().length > 0);
   if (lines.length < 2) return [];
@@ -454,7 +525,8 @@ export async function importOrdersFromCsvFile(file: File, fallbackDate?: string)
     rawHeaders,
     lines.slice(1).map(line => parseCsvLine(line, delimiter)),
     fallbackDate,
-    200000
+    200000,
+    bagVolumeRules
   );
 
   if (importedRows.length === 0) {
@@ -469,7 +541,11 @@ function isExcelFile(file: File): boolean {
   return name.endsWith('.xlsx') || name.endsWith('.xls');
 }
 
-export async function importOrdersFromExcelFile(file: File, fallbackDate?: string): Promise<Order[]> {
+export async function importOrdersFromExcelFile(
+  file: File,
+  fallbackDate?: string,
+  bagVolumeRules: BagVolumeRule[] = DEFAULT_BAG_VOLUME_RULES
+): Promise<Order[]> {
   const XLSX = await import('xlsx');
   const data = await file.arrayBuffer();
   const workbook = XLSX.read(data, { type: 'array', cellDates: true });
@@ -497,7 +573,13 @@ export async function importOrdersFromExcelFile(file: File, fallbackDate?: strin
     throw new Error('Geen geldige kopregel gevonden in Excel. Controleer kolommen zoals ML, Order Nummer of P.O. en Item / recept.');
   }
 
-  const importedRows = buildOrdersFromTableRows(rows[headerIndex], rows.slice(headerIndex + 1), fallbackDate, 300000);
+  const importedRows = buildOrdersFromTableRows(
+    rows[headerIndex],
+    rows.slice(headerIndex + 1),
+    fallbackDate,
+    300000,
+    bagVolumeRules
+  );
 
   if (importedRows.length === 0) {
     throw new Error('Geen geldige orders gevonden in Excel. Controleer kolommen zoals ML, Order Nummer of P.O. en Item / recept.');
@@ -506,10 +588,14 @@ export async function importOrdersFromExcelFile(file: File, fallbackDate?: strin
   return importedRows;
 }
 
-export async function importOrdersFromLocalFile(file: File, fallbackDate?: string): Promise<Order[]> {
+export async function importOrdersFromLocalFile(
+  file: File,
+  fallbackDate?: string,
+  bagVolumeRules: BagVolumeRule[] = DEFAULT_BAG_VOLUME_RULES
+): Promise<Order[]> {
   return isExcelFile(file)
-    ? importOrdersFromExcelFile(file, fallbackDate)
-    : importOrdersFromCsvFile(file, fallbackDate);
+    ? importOrdersFromExcelFile(file, fallbackDate, bagVolumeRules)
+    : importOrdersFromCsvFile(file, fallbackDate, bagVolumeRules);
 }
 
 export interface CalibrationMaterial {
