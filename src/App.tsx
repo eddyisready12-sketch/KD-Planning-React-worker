@@ -346,7 +346,9 @@ export default function App() {
   const [driverSyncDebug, setDriverSyncDebug] = useState('');
   const [isSavingDriver, setIsSavingDriver] = useState(false);
   const [draggedOperatorOrderId, setDraggedOperatorOrderId] = useState<number | null>(null);
+  const draggedOperatorOrderIdRef = useRef<number | null>(null);
   const [operatorDropTargetId, setOperatorDropTargetId] = useState<number | null>(null);
+  const [manualOperatorOrderLines, setManualOperatorOrderLines] = useState<Partial<Record<LineId, boolean>>>({});
   const [isClearingOrders, setIsClearingOrders] = useState(false);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
   const [csvImportFeedback, setCsvImportFeedback] = useState<{ type: 'ok' | 'error' | 'busy'; text: string } | null>(null);
@@ -3390,6 +3392,7 @@ export default function App() {
     })();
 
     setPlannedOrderIdsByLine(nextPlan);
+    setManualOperatorOrderLines(prev => ({ ...prev, [lid]: true }));
     if (isSupabaseConfigured()) {
       void writePlannedOrderIdsToSupabase(nextPlan);
     }
@@ -4165,7 +4168,9 @@ export default function App() {
 
         return sorted;
       };
-      const sortedEntries = sortByBestNext(prioritizedEntries, displayedCurrentOrder || null);
+      const sortedEntries = manualOperatorOrderLines[selectedLine]
+        ? prioritizedEntries
+        : sortByBestNext(prioritizedEntries, displayedCurrentOrder || null);
       const orderedOrders = sortedEntries.map(entry => entry.order);
       const starts = getScheduledStartsForLine(orderedOrders, lid);
 
@@ -4230,7 +4235,7 @@ export default function App() {
           operatorState
         };
       });
-    }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime]);
+    }, [plannedEntries, currentTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime, manualOperatorOrderLines]);
 
   const nextOperatorOrder = useMemo(
     () => operatorDisplayEntries[0]?.order || null,
@@ -5311,29 +5316,48 @@ export default function App() {
                             draggable
                             onClick={() => setSelectedOrderForDetail(o)}
                             onDragStart={(e) => {
+                              draggedOperatorOrderIdRef.current = o.id;
                               setDraggedOperatorOrderId(o.id);
                               setOperatorDropTargetId(null);
+                              e.currentTarget.classList.add('opacity-60');
                               e.dataTransfer.setData('text/plain', String(o.id));
+                              e.dataTransfer.setData('application/x-kd-operator-order-id', String(o.id));
                               e.dataTransfer.effectAllowed = 'move';
                             }}
-                            onDragEnd={() => {
+                            onDragEnd={(e) => {
+                              e.currentTarget.classList.remove('opacity-60');
+                              draggedOperatorOrderIdRef.current = null;
                               setDraggedOperatorOrderId(null);
                               setOperatorDropTargetId(null);
                             }}
+                            onDragEnter={(e) => {
+                              const draggedId = draggedOperatorOrderIdRef.current || draggedOperatorOrderId;
+                              if (!draggedId || draggedId === o.id) return;
+                              e.preventDefault();
+                              if (operatorDropTargetId !== o.id) setOperatorDropTargetId(o.id);
+                            }}
                             onDragOver={(e) => {
-                              if (draggedOperatorOrderId === null || draggedOperatorOrderId === o.id) return;
+                              const draggedId = draggedOperatorOrderIdRef.current || draggedOperatorOrderId;
+                              if (!draggedId || draggedId === o.id) return;
                               e.preventDefault();
                               e.dataTransfer.dropEffect = 'move';
-                              setOperatorDropTargetId(o.id);
+                              if (operatorDropTargetId !== o.id) setOperatorDropTargetId(o.id);
                             }}
                             onDragLeave={() => {
                               if (operatorDropTargetId === o.id) setOperatorDropTargetId(null);
                             }}
                             onDrop={(e) => {
                               e.preventDefault();
-                              const droppedId = Number(e.dataTransfer.getData('text/plain') || draggedOperatorOrderId);
+                              e.stopPropagation();
+                              const droppedId = Number(
+                                e.dataTransfer.getData('application/x-kd-operator-order-id') ||
+                                e.dataTransfer.getData('text/plain') ||
+                                draggedOperatorOrderIdRef.current ||
+                                draggedOperatorOrderId
+                              );
                               if (!droppedId || droppedId === o.id) return;
                               reorderOperatorLineOrders(selectedLine, droppedId, o.id);
+                              draggedOperatorOrderIdRef.current = null;
                               setDraggedOperatorOrderId(null);
                               setOperatorDropTargetId(null);
                             }}
