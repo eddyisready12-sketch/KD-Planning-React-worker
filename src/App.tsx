@@ -5099,14 +5099,7 @@ export default function App() {
       </AnimatePresence>
 
       <main className="flex-1 overflow-y-auto p-7 min-h-0">
-        <AnimatePresence initial={false}>
-          <motion.div
-            key={view}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.08 }}
-          >
+        <>
             {view === 'operator' && (
               <div className="max-w-6xl mx-auto">
                 {activeIssueEntries.length > 0 && (
@@ -5815,14 +5808,7 @@ export default function App() {
                 </div>
 
                 {/* Sub View Content */}
-                <AnimatePresence initial={false}>
-                  <motion.div
-                    key={plannerTab}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.06 }}
-                  >
+                <div>
                     {plannerTab === 'dagrooster' && (
                       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                         <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/70 flex flex-wrap items-center justify-between gap-3">
@@ -7218,8 +7204,7 @@ export default function App() {
                         </table>
                       </div>
                     )}
-                  </motion.div>
-                </AnimatePresence>
+                </div>
               </div>
             )}
 
@@ -7614,8 +7599,7 @@ export default function App() {
                 </div>
               </div>
             )}
-          </motion.div>
-        </AnimatePresence>
+        </>
 
         {/* Bunker Edit Modal */}
         <AnimatePresence>
