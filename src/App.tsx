@@ -393,18 +393,20 @@ export default function App() {
   const [manualOperatorOrderLines, setManualOperatorOrderLines] = useState<Partial<Record<LineId, boolean>>>({});
   const deferredPlannerSearch = useDeferredValue(plannerSearch);
   const deferredChauffeurSearch = useDeferredValue(chauffeurSearch);
-  const isPlannerView = view === 'planner';
+  const deferredView = useDeferredValue(view);
+  const deferredPlannerTab = useDeferredValue(plannerTab);
+  const isPlannerView = deferredView === 'planner';
   const changeView = useCallback((nextView: typeof view) => {
-    React.startTransition(() => setView(nextView));
+    setView(nextView);
   }, []);
   const changePlannerTab = useCallback((nextTab: typeof plannerTab) => {
-    React.startTransition(() => setPlannerTab(nextTab));
+    setPlannerTab(nextTab);
   }, []);
   const changeSelectedLine = useCallback((nextLine: LineId) => {
-    React.startTransition(() => setSelectedLine(nextLine));
+    setSelectedLine(nextLine);
   }, []);
   const changePlannerLineFilter = useCallback((nextLine: number) => {
-    React.startTransition(() => setPlannerLineFilter(nextLine));
+    setPlannerLineFilter(nextLine);
   }, []);
   const [isClearingOrders, setIsClearingOrders] = useState(false);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
@@ -4172,7 +4174,7 @@ export default function App() {
   );
 
   const dayRosterEntries = useMemo(() => {
-    if (!isPlannerView || plannerTab !== 'dagrooster') return [];
+    if (!isPlannerView || deferredPlannerTab !== 'dagrooster') return [];
     const search = deferredPlannerSearch.trim().toLowerCase();
     return lineIds
       .filter(lid => plannerLineFilter === 0 || lid === plannerLineFilter)
@@ -4222,7 +4224,7 @@ export default function App() {
         if (a.order.line !== b.order.line) return a.order.line - b.order.line;
         return a.order.customer.localeCompare(b.order.customer, 'nl-NL');
       });
-  }, [isPlannerView, plannerTab, filteredPlannerDisplayEntriesByLine, lineIds, plannerLineFilter, deferredPlannerSearch]);
+  }, [isPlannerView, deferredPlannerTab, filteredPlannerDisplayEntriesByLine, lineIds, plannerLineFilter, deferredPlannerSearch]);
 
   const dayRosterColumns = useMemo(() => {
     const assignedDrivers = Array.from(new Set(
@@ -4554,7 +4556,7 @@ export default function App() {
   [completedOrders]);
 
   const truckOrders = useMemo(() => {
-    if (!isPlannerView || plannerTab !== 'vrachtwagens') return [];
+    if (!isPlannerView || deferredPlannerTab !== 'vrachtwagens') return [];
     return activeOrders
       .filter(o => o.pkg === 'bulk')
       .slice()
@@ -4565,7 +4567,7 @@ export default function App() {
         if (a.line !== b.line) return a.line - b.line;
         return a.customer.localeCompare(b.customer);
       });
-  }, [isPlannerView, plannerTab, activeOrders]);
+  }, [isPlannerView, deferredPlannerTab, activeOrders]);
 
   const plannerDrivers = useMemo(() => {
     if (!isPlannerView) return [];
@@ -4613,17 +4615,17 @@ export default function App() {
   }, [isPlannerView, plannedActiveOrders, plannerLineFilter, lineTimelineEntryByOrderId, sharedDriverNames, sharedDrivers]);
 
   const visiblePlannerDrivers = useMemo(() => {
-    if (!isPlannerView || plannerTab !== 'chauffeurs') return [];
+    if (!isPlannerView || deferredPlannerTab !== 'chauffeurs') return [];
     const q = deferredChauffeurSearch.trim().toLowerCase();
     if (!q) return plannerDrivers;
     return plannerDrivers.filter(driver =>
       driver.name.toLowerCase().includes(q) ||
       driver.lines.some(line => `ml${line}`.includes(q))
     );
-  }, [isPlannerView, plannerTab, plannerDrivers, deferredChauffeurSearch]);
+  }, [isPlannerView, deferredPlannerTab, plannerDrivers, deferredChauffeurSearch]);
 
   const chauffeurOrders = useMemo(() => {
-    if (!isPlannerView || plannerTab !== 'chauffeurs') return [];
+    if (!isPlannerView || deferredPlannerTab !== 'chauffeurs') return [];
     return plannedActiveOrders
       .filter(o => plannerLineFilter === 0 || o.line === plannerLineFilter)
       .filter(o => {
@@ -4642,7 +4644,7 @@ export default function App() {
           (o.driver || '').toLowerCase().includes(s)
         );
       });
-  }, [isPlannerView, plannerTab, plannedActiveOrders, plannerLineFilter, deferredPlannerSearch, chauffeurTypeFilter]);
+  }, [isPlannerView, deferredPlannerTab, plannedActiveOrders, plannerLineFilter, deferredPlannerSearch, chauffeurTypeFilter]);
 
   const selectedDriverOrders = useMemo(() => {
     return chauffeurOrders
@@ -5101,13 +5103,13 @@ export default function App() {
       <main className="flex-1 overflow-y-auto p-7 min-h-0">
         <AnimatePresence initial={false}>
           <motion.div
-            key={view}
+            key={deferredView}
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.08 }}
           >
-            {view === 'operator' && (
+            {deferredView === 'operator' && (
               <div className="max-w-6xl mx-auto">
                 {activeIssueEntries.length > 0 && (
                   <div className="space-y-3 mb-5">
@@ -5683,7 +5685,7 @@ export default function App() {
               </div>
             )}
 
-            {view === 'planner' && (
+            {deferredView === 'planner' && (
               <div className="max-w-[1600px] mx-auto">
                 <div className="flex items-center justify-between mb-4">
                   <div>
@@ -5817,13 +5819,13 @@ export default function App() {
                 {/* Sub View Content */}
                 <AnimatePresence initial={false}>
                   <motion.div
-                    key={plannerTab}
+                    key={deferredPlannerTab}
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0 }}
                     transition={{ duration: 0.06 }}
                   >
-                    {plannerTab === 'dagrooster' && (
+                    {deferredPlannerTab === 'dagrooster' && (
                       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                         <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/70 flex flex-wrap items-center justify-between gap-3">
                           <div>
@@ -6035,7 +6037,7 @@ export default function App() {
                       </div>
                     )}
 
-                    {plannerTab === 'schema' && (
+                    {deferredPlannerTab === 'schema' && (
                       <>
                         {plannerLineFilter !== 0 && storingen[plannerLineFilter as LineId]?.actief && (
                           <div className={`mb-4 rounded-2xl border px-6 py-5 ${
@@ -6543,7 +6545,7 @@ export default function App() {
                       </>
                     )}
 
-                    {plannerTab === 'wachtrij' && (
+                    {deferredPlannerTab === 'wachtrij' && (
                       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                         <table className="wtbl">
                           <thead>
@@ -6666,7 +6668,7 @@ export default function App() {
                       </div>
                     )}
 
-                    {plannerTab === 'vrachtwagens' && (
+                    {deferredPlannerTab === 'vrachtwagens' && (
                       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                         <table className="wtbl">
                           <thead>
@@ -6795,7 +6797,7 @@ export default function App() {
                       </div>
                     )}
 
-                    {plannerTab === 'chauffeurs' && (
+                    {deferredPlannerTab === 'chauffeurs' && (
                       <div className="grid grid-cols-1 xl:grid-cols-[340px_1fr] gap-4">
                         <div className="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
                           <div className="max-h-[78vh] overflow-y-auto px-4 pb-4">
@@ -7158,7 +7160,7 @@ export default function App() {
                       </div>
                     )}
 
-                    {plannerTab === 'voltooid' && (
+                    {deferredPlannerTab === 'voltooid' && (
                       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                         <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/60 flex items-center justify-between">
                           <div className="text-sm text-gray-500">
@@ -7223,7 +7225,7 @@ export default function App() {
               </div>
             )}
 
-            {view === 'notifications' && (
+            {deferredView === 'notifications' && (
               <div className="max-w-3xl mx-auto">
                 <div className="flex items-center justify-between mb-4.5">
                   <div>
@@ -7275,7 +7277,7 @@ export default function App() {
               </div>
             )}
 
-            {view === 'bunkers' && (
+            {deferredView === 'bunkers' && (
               <div className="max-w-6xl mx-auto">
                 <h1 className="text-lg font-bold mb-5">Bunkerbeheer</h1>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -7328,7 +7330,7 @@ export default function App() {
               </div>
             )}
 
-            {view === 'settings' && (
+            {deferredView === 'settings' && (
               <div className="max-w-4xl mx-auto">
                 <h1 className="text-lg font-bold mb-4.5">Instellingen</h1>
 
