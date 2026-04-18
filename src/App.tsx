@@ -2,7 +2,7 @@
 import { 
   LineId, Order, Bunker, Melding, Storing, AppConfig, Truck, PlannerTrigger, OrderComponent, BagVolumeRule
 } from './types';
-import { useRef, useDeferredValue } from 'react';
+import { useRef, useDeferredValue, startTransition } from 'react';
 import { 
   LINES, DEFAULT_CFG, INITIAL_BUNKERS 
 } from './constants';
@@ -394,17 +394,26 @@ export default function App() {
   const deferredPlannerSearch = useDeferredValue(plannerSearch);
   const deferredChauffeurSearch = useDeferredValue(chauffeurSearch);
   const isPlannerView = view === 'planner';
+  const isOperatorView = view === 'operator';
   const changeView = useCallback((nextView: typeof view) => {
-    setView(nextView);
+    startTransition(() => {
+      setView(current => current === nextView ? current : nextView);
+    });
   }, []);
   const changePlannerTab = useCallback((nextTab: typeof plannerTab) => {
-    setPlannerTab(nextTab);
+    startTransition(() => {
+      setPlannerTab(current => current === nextTab ? current : nextTab);
+    });
   }, []);
   const changeSelectedLine = useCallback((nextLine: LineId) => {
-    setSelectedLine(nextLine);
+    startTransition(() => {
+      setSelectedLine(current => current === nextLine ? current : nextLine);
+    });
   }, []);
   const changePlannerLineFilter = useCallback((nextLine: number) => {
-    setPlannerLineFilter(nextLine);
+    startTransition(() => {
+      setPlannerLineFilter(current => current === nextLine ? current : nextLine);
+    });
   }, []);
   const [isClearingOrders, setIsClearingOrders] = useState(false);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
@@ -4145,6 +4154,10 @@ export default function App() {
   }, [isPlannerView, plannerVisibleDates, plannerSelectedDate, planningTime]);
 
   const filteredPlannerDisplayEntriesByLine = useMemo(() => {
+    if (!isPlannerView) {
+      return { 1: [], 2: [], 3: [] } as Record<LineId, ScheduledLineEntry[]>;
+    }
+
     const isVisibleOnSelectedDate = (entry: ScheduledLineEntry) => {
       const runningStart = getRunningOrderStart(entry.order);
       return formatLocalDate(runningStart || entry.prodStart) === plannerSelectedDate;
@@ -4154,7 +4167,7 @@ export default function App() {
       2: plannerDisplayEntriesByLine[2].filter(isVisibleOnSelectedDate),
       3: plannerDisplayEntriesByLine[3].filter(isVisibleOnSelectedDate)
     };
-  }, [plannerDisplayEntriesByLine, plannerSelectedDate]);
+  }, [isPlannerView, plannerDisplayEntriesByLine, plannerSelectedDate]);
 
   const plannerDisplayIndexByLine = useMemo(() => ({
     1: new Map(filteredPlannerDisplayEntriesByLine[1].map((entry, index) => [entry.order.id, index])),
@@ -4302,6 +4315,8 @@ export default function App() {
   const visiblePlannerTriggers = activePlannerTriggerRows;
 
   const operatorDisplayEntries = useMemo(() => {
+      if (!isOperatorView) return [];
+
       const nowMinutes = planningTime.getHours() * 60 + planningTime.getMinutes();
   
       const prioritizedEntries = plannedEntries
@@ -4424,7 +4439,7 @@ export default function App() {
           operatorState
         };
       });
-    }, [plannedEntries, planningTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime, manualOperatorOrderLines]);
+    }, [isOperatorView, plannedEntries, planningTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime, manualOperatorOrderLines]);
 
   const nextOperatorOrder = useMemo(
     () => operatorDisplayEntries[0]?.order || null,
