@@ -395,6 +395,9 @@ export default function App() {
   const deferredChauffeurSearch = useDeferredValue(chauffeurSearch);
   const isPlannerView = view === 'planner';
   const isOperatorView = view === 'operator';
+  const isDayRosterTabVisible = isPlannerView && plannerTab === 'dagrooster';
+  const isChauffeurTabVisible = isPlannerView && plannerTab === 'chauffeurs';
+  const isCompletedTabVisible = isPlannerView && plannerTab === 'voltooid';
   const changeView = useCallback((nextView: typeof view) => {
     startTransition(() => {
       setView(current => current === nextView ? current : nextView);
@@ -3251,7 +3254,14 @@ export default function App() {
       return etaA - etaB;
     });
   }, [orders, plannerSort, bunkers]);
-  const completedOrders = useMemo(() => orders.filter(o => o.status === 'completed'), [orders]);
+  const completedOrderCount = useMemo(
+    () => orders.reduce((count, order) => count + (order.status === 'completed' ? 1 : 0), 0),
+    [orders]
+  );
+  const completedOrders = useMemo(() => {
+    if (!isCompletedTabVisible) return [];
+    return orders.filter(o => o.status === 'completed');
+  }, [isCompletedTabVisible, orders]);
 
   useEffect(() => {
     setPlannedOrderIdsByLine(prev => {
@@ -4181,12 +4191,14 @@ export default function App() {
   const dayRosterRowHeight = 42;
   const dayRosterSlotCount = Math.floor((dayRosterEndMinutes - dayRosterStartMinutes) / dayRosterSlotMinutes) + 1;
   const dayRosterTimeSlots = useMemo(
-    () => Array.from({ length: dayRosterSlotCount }, (_, index) => dayRosterStartMinutes + index * dayRosterSlotMinutes),
-    [dayRosterSlotCount]
+    () => isDayRosterTabVisible
+      ? Array.from({ length: dayRosterSlotCount }, (_, index) => dayRosterStartMinutes + index * dayRosterSlotMinutes)
+      : [],
+    [isDayRosterTabVisible, dayRosterSlotCount]
   );
 
   const dayRosterEntries = useMemo(() => {
-    if (!isPlannerView || plannerTab !== 'dagrooster') return [];
+    if (!isDayRosterTabVisible) return [];
     const search = deferredPlannerSearch.trim().toLowerCase();
     return lineIds
       .filter(lid => plannerLineFilter === 0 || lid === plannerLineFilter)
@@ -4236,9 +4248,10 @@ export default function App() {
         if (a.order.line !== b.order.line) return a.order.line - b.order.line;
         return a.order.customer.localeCompare(b.order.customer, 'nl-NL');
       });
-  }, [isPlannerView, plannerTab, filteredPlannerDisplayEntriesByLine, lineIds, plannerLineFilter, deferredPlannerSearch]);
+  }, [isDayRosterTabVisible, filteredPlannerDisplayEntriesByLine, lineIds, plannerLineFilter, deferredPlannerSearch]);
 
   const dayRosterColumns = useMemo(() => {
+    if (!isDayRosterTabVisible) return [];
     const assignedDrivers = Array.from(new Set(
       dayRosterEntries
         .map(entry => String(entry.order.driver || '').trim())
@@ -4289,10 +4302,11 @@ export default function App() {
       if (a.line !== b.line) return a.line - b.line;
       return a.label.localeCompare(b.label, 'nl-NL');
     });
-  }, [dayRosterBaseDrivers, dayRosterEntries]);
+  }, [isDayRosterTabVisible, dayRosterBaseDrivers, dayRosterEntries]);
 
   const dayRosterOrdersPerColumn = useMemo(() => {
     const map = new Map<string, typeof dayRosterEntries>();
+    if (!isDayRosterTabVisible) return map;
     dayRosterColumns.forEach(column => {
       map.set(
         column.key,
@@ -4300,16 +4314,16 @@ export default function App() {
       );
     });
     return map;
-  }, [dayRosterColumns, dayRosterEntries]);
+  }, [isDayRosterTabVisible, dayRosterColumns, dayRosterEntries]);
 
   const dayRosterDriverColumns = useMemo(
-    () => dayRosterColumns.filter(column => !column.isUnassigned),
-    [dayRosterColumns]
+    () => isDayRosterTabVisible ? dayRosterColumns.filter(column => !column.isUnassigned) : [],
+    [isDayRosterTabVisible, dayRosterColumns]
   );
 
   const dayRosterUnassignedEntries = useMemo(
-    () => dayRosterEntries.filter(entry => entry.isUnassigned),
-    [dayRosterEntries]
+    () => isDayRosterTabVisible ? dayRosterEntries.filter(entry => entry.isUnassigned) : [],
+    [isDayRosterTabVisible, dayRosterEntries]
   );
 
   const visiblePlannerTriggers = activePlannerTriggerRows;
@@ -4566,8 +4580,8 @@ export default function App() {
   }, [operatorDisplayEntries, currentTime]);
 
   const totalCompletedM3 = useMemo(() => 
-    completedOrders.reduce((sum, o) => sum + ev(o), 0), 
-  [completedOrders]);
+    orders.reduce((sum, o) => o.status === 'completed' ? sum + ev(o) : sum, 0), 
+  [orders]);
 
   const truckOrders = useMemo(() => {
     if (!isPlannerView || plannerTab !== 'vrachtwagens') return [];
@@ -4583,8 +4597,28 @@ export default function App() {
       });
   }, [isPlannerView, plannerTab, activeOrders]);
 
-  const plannerDrivers = useMemo(() => {
+  const plannerDriverCount = useMemo(() => {
     if (!isPlannerView) return [];
+    const driverNames = new Set<string>();
+    plannedActiveOrders
+      .filter(order => plannerLineFilter === 0 || order.line === plannerLineFilter)
+      .forEach(order => {
+        const name = String(order.driver || '').trim();
+        if (name) driverNames.add(name);
+      });
+    sharedDrivers.forEach(driver => {
+      const name = String(driver.name || '').trim();
+      if (name) driverNames.add(name);
+    });
+    sharedDriverNames.forEach(driverName => {
+      const name = String(driverName || '').trim();
+      if (name) driverNames.add(name);
+    });
+    return driverNames.size;
+  }, [isPlannerView, plannedActiveOrders, plannerLineFilter, sharedDrivers, sharedDriverNames]);
+
+  const plannerDrivers = useMemo(() => {
+    if (!isChauffeurTabVisible) return [];
     const driverCounts = new Map<string, { count: number; lines: Set<LineId>; totalVolume: number; firstStart: number | null; lastEnd: number | null }>();
     plannedActiveOrders
       .filter(order => plannerLineFilter === 0 || order.line === plannerLineFilter)
@@ -4626,7 +4660,7 @@ export default function App() {
       };
       })
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'nl-NL'));
-  }, [isPlannerView, plannedActiveOrders, plannerLineFilter, lineTimelineEntryByOrderId, sharedDriverNames, sharedDrivers]);
+  }, [isChauffeurTabVisible, plannedActiveOrders, plannerLineFilter, lineTimelineEntryByOrderId, sharedDriverNames, sharedDrivers]);
 
   const visiblePlannerDrivers = useMemo(() => {
     if (!isPlannerView || plannerTab !== 'chauffeurs') return [];
