@@ -1847,11 +1847,12 @@ export default function App() {
 
   // Tickers
   useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(new Date()), 5000);
+    // Keep the header clock independent; these ticks only drive expensive planning/progress calculations.
+    const timer = setInterval(() => setCurrentTime(new Date()), 15000);
     const planningTimer = setInterval(() => setPlanningTime(new Date()), 15000);
     const progTimer = setInterval(() => {
       setProgress(p => Math.min(p + 0.06, 99));
-    }, 3000);
+    }, 15000);
     return () => {
       clearInterval(timer);
       clearInterval(planningTimer);
