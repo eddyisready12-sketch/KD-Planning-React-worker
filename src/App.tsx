@@ -398,6 +398,7 @@ export default function App() {
   const isDayRosterTabVisible = isPlannerView && plannerTab === 'dagrooster';
   const isChauffeurTabVisible = isPlannerView && plannerTab === 'chauffeurs';
   const isCompletedTabVisible = isPlannerView && plannerTab === 'voltooid';
+  const isTruckTabVisible = isPlannerView && plannerTab === 'vrachtwagens';
   const changeView = useCallback((nextView: typeof view) => {
     startTransition(() => {
       setView(current => current === nextView ? current : nextView);
@@ -4584,7 +4585,7 @@ export default function App() {
   [orders]);
 
   const truckOrders = useMemo(() => {
-    if (!isPlannerView || plannerTab !== 'vrachtwagens') return [];
+    if (!isTruckTabVisible) return [];
     return activeOrders
       .filter(o => o.pkg === 'bulk')
       .slice()
@@ -4595,10 +4596,10 @@ export default function App() {
         if (a.line !== b.line) return a.line - b.line;
         return a.customer.localeCompare(b.customer);
       });
-  }, [isPlannerView, plannerTab, activeOrders]);
+  }, [isTruckTabVisible, activeOrders]);
 
   const plannerDriverCount = useMemo(() => {
-    if (!isPlannerView) return [];
+    if (!isPlannerView) return 0;
     const driverNames = new Set<string>();
     plannedActiveOrders
       .filter(order => plannerLineFilter === 0 || order.line === plannerLineFilter)
@@ -4663,17 +4664,17 @@ export default function App() {
   }, [isChauffeurTabVisible, plannedActiveOrders, plannerLineFilter, lineTimelineEntryByOrderId, sharedDriverNames, sharedDrivers]);
 
   const visiblePlannerDrivers = useMemo(() => {
-    if (!isPlannerView || plannerTab !== 'chauffeurs') return [];
+    if (!isChauffeurTabVisible) return [];
     const q = deferredChauffeurSearch.trim().toLowerCase();
     if (!q) return plannerDrivers;
     return plannerDrivers.filter(driver =>
       driver.name.toLowerCase().includes(q) ||
       driver.lines.some(line => `ml${line}`.includes(q))
     );
-  }, [isPlannerView, plannerTab, plannerDrivers, deferredChauffeurSearch]);
+  }, [isChauffeurTabVisible, plannerDrivers, deferredChauffeurSearch]);
 
   const chauffeurOrders = useMemo(() => {
-    if (!isPlannerView || plannerTab !== 'chauffeurs') return [];
+    if (!isChauffeurTabVisible) return [];
     return plannedActiveOrders
       .filter(o => plannerLineFilter === 0 || o.line === plannerLineFilter)
       .filter(o => {
@@ -4692,7 +4693,7 @@ export default function App() {
           (o.driver || '').toLowerCase().includes(s)
         );
       });
-  }, [isPlannerView, plannerTab, plannedActiveOrders, plannerLineFilter, deferredPlannerSearch, chauffeurTypeFilter]);
+  }, [isChauffeurTabVisible, plannedActiveOrders, plannerLineFilter, deferredPlannerSearch, chauffeurTypeFilter]);
 
   const selectedDriverOrders = useMemo(() => {
     return chauffeurOrders
@@ -5790,9 +5791,9 @@ export default function App() {
                       { id: 'schema', lbl: 'Lijn Schema' },
                       { id: 'wachtrij', lbl: 'Order Wachtrij' },
                       { id: 'dagrooster', lbl: 'Dagrooster' },
-                      { id: 'chauffeurs', lbl: `Chauffeurs (${plannerDrivers.length})` },
+                      { id: 'chauffeurs', lbl: `Chauffeurs (${plannerDriverCount})` },
                       { id: 'vrachtwagens', lbl: 'Vrachtwagenritten' },
-                      { id: 'voltooid', lbl: `Voltooid (${completedOrders.length})` }
+                      { id: 'voltooid', lbl: `Voltooid (${completedOrderCount})` }
                     ].map(t => (
                       <button 
                         key={t.id}
