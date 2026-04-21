@@ -9,7 +9,7 @@ import {
 import {
   fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, materialsMixCompatible, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides, FRACTION_MIX_MATERIAL_NAME, FRACTION_MIX_MATERIAL_CODE, isFractieMixMaterial
 } from './utils';
-import { fetchBunkersFromSheet, importOrdersFromLocalFile, DEFAULT_BAG_VOLUME_RULES, CalibrationMaterial } from './services/sheetService';
+import { importOrdersFromLocalFile, DEFAULT_BAG_VOLUME_RULES, CalibrationMaterial } from './services/sheetService';
 import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBagVolumeRulesFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriversFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, setDriverActiveInSupabase, upsertDriverInSupabase, writeBagVolumeRulesToSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow, type SharedDriver } from './services/supabaseService';
 import { supabase } from './services/supabaseClient';
 import { 
@@ -709,33 +709,27 @@ export default function App() {
   const laadKalibratie = async () => {
       setDataSource(prev => ({ ...prev, loading: true, error: null }));
       try {
-        const urls = dataSource.calibrationUrls;
-        const results = await Promise.all([
-        fetchBunkersFromSheet(urls[1], 1),
-        fetchBunkersFromSheet(urls[2], 2),
-        fetchBunkersFromSheet(urls[3], 3)
-      ]);
-      
-      const importedBunkers: Record<LineId, Bunker[]> = {
-        1: results[0].bunkers[1],
-        2: results[1].bunkers[2],
-        3: results[2].bunkers[3]
-      };
-      
-      // Merge materials and deduplicate by name
-      const allMaterials = results.flatMap(r => r.materials);
-      const materialsMap = new Map<string, CalibrationMaterial>();
-      allMaterials.forEach(m => {
-        const existing = materialsMap.get(m.name);
-        if (!existing || (m.calibrationValue !== null && existing.calibrationValue === null)) {
-          materialsMap.set(m.name, m);
-        }
+        const sharedBunkerRows = isSupabaseConfigured() ? await fetchBunkerStateFromSupabase() : [];
+        const finalCalibrationRows: SharedBunkerMaterialRow[] = isSupabaseConfigured()
+          ? await fetchBunkerMaterialsFromSupabase()
+          : [];
+        const materialsMap = new Map<string, CalibrationMaterial>();
+        finalCalibrationRows.forEach(row => {
+          const materialName = String(row.material_name || '').trim();
+          if (!materialName) return;
+          const calibrationValue = row.calibration_value === null || row.calibration_value === undefined
+            ? null
+            : Number(row.calibration_value);
+          const existing = materialsMap.get(materialName);
+          if (!existing || (calibrationValue !== null && existing.calibrationValue === null)) {
+            materialsMap.set(materialName, {
+              name: materialName,
+              code: row.material_code ? String(row.material_code) : null,
+              calibrationValue
+            });
+          }
         });
         const importedMaterials = Array.from(materialsMap.values());
-        
-        const hasBunkers = Object.values(importedBunkers).some(arr => arr.length > 0);
-        const hasMaterials = importedMaterials.length > 0;
-        const sharedBunkerRows = isSupabaseConfigured() ? await fetchBunkerStateFromSupabase() : [];
         const sharedBunkerByKey = new Map(
           sharedBunkerRows.map(row => [
             `${Number(row.line_id || 0)}|${String(row.bunker_code || '')}`,
@@ -743,47 +737,32 @@ export default function App() {
           ])
         );
 
-        // Merge with base bunker definitions so allowed/calibrated alternatives do not disappear
-        // when the sheet only contains the current filling per bunker.
         const nextBunkers = { ...bunkers };
-        (Object.keys(importedBunkers) as unknown as LineId[]).forEach(lid => {
-          if (importedBunkers[lid] && importedBunkers[lid].length > 0) {
-            const previousByCode = new Map((bunkers[lid] || []).map(b => [b.c, b]));
-            const baseByCode = new Map((INITIAL_BUNKERS[lid] || []).map(b => [b.c, b]));
-            nextBunkers[lid] = importedBunkers[lid].map(imported => {
-              const previous = previousByCode.get(imported.c);
-              const base = baseByCode.get(imported.c);
-              const sharedState = sharedBunkerByKey.get(`${lid}|${imported.c}`);
-              const mergedMaterials = Array.from(new Set([
-                ...(base?.ms || []),
-                ...(previous?.ms || []),
-                ...(imported.ms || [])
-              ]));
-              return {
-                ...base,
-                ...previous,
-                ...imported,
-                m: sharedState?.current_material ?? sharedState?.material_name ?? imported.m ?? previous?.m ?? base?.m ?? null,
-                mc: sharedState?.current_material_code ?? sharedState?.material_code ?? imported.mc ?? previous?.mc ?? base?.mc ?? null,
-                fx: sharedState?.fixed ?? sharedState?.is_fixed ?? imported.fx ?? previous?.fx ?? base?.fx ?? false,
-                mustEmpty: sharedState?.must_empty ?? imported.mustEmpty ?? previous?.mustEmpty ?? base?.mustEmpty,
-                leegNaOrder: sharedState?.empty_after_order ?? imported.leegNaOrder ?? previous?.leegNaOrder ?? base?.leegNaOrder ?? null,
-                ms: mergedMaterials,
-                materialData: {
-                  ...(base?.materialData || {}),
-                  ...(previous?.materialData || {}),
-                  ...(imported.materialData || {})
-                }
-              };
-            });
-          }
+        ([1, 2, 3] as LineId[]).forEach(lid => {
+          const previousByCode = new Map((bunkers[lid] || []).map(b => [b.c, b]));
+          nextBunkers[lid] = (INITIAL_BUNKERS[lid] || []).map(baseBunker => {
+            const previous = previousByCode.get(baseBunker.c);
+            const sharedState = sharedBunkerByKey.get(`${lid}|${baseBunker.c}`);
+            const mergedMaterials = Array.from(new Set([
+              ...(baseBunker.ms || []),
+              ...(previous?.ms || [])
+            ]));
+            return {
+              ...baseBunker,
+              ...previous,
+              m: sharedState?.current_material ?? sharedState?.material_name ?? previous?.m ?? baseBunker.m ?? null,
+              mc: sharedState?.current_material_code ?? sharedState?.material_code ?? previous?.mc ?? baseBunker.mc ?? null,
+              fx: sharedState?.fixed ?? sharedState?.is_fixed ?? previous?.fx ?? baseBunker.fx ?? false,
+              mustEmpty: sharedState?.must_empty ?? previous?.mustEmpty ?? baseBunker.mustEmpty,
+              leegNaOrder: sharedState?.empty_after_order ?? previous?.leegNaOrder ?? baseBunker.leegNaOrder ?? null,
+              ms: mergedMaterials,
+              materialData: {
+                ...(baseBunker.materialData || {}),
+                ...(previous?.materialData || {})
+              }
+            };
+          });
         });
-        let finalCalibrationRows: SharedBunkerMaterialRow[] = [];
-
-        if (isSupabaseConfigured() && hasBunkers) {
-          await writeBunkerMaterialsToSupabase(nextBunkers);
-          finalCalibrationRows = await fetchBunkerMaterialsFromSupabase();
-        }
 
         const mergedCalibration = mergeSharedCalibrationIntoBunkers(nextBunkers, finalCalibrationRows);
         setBunkers(mergedCalibration.bunkers);
@@ -796,11 +775,11 @@ export default function App() {
       setDataSource(prev => ({ ...prev, loading: false, lastSync: new Date().toISOString() }));
       
       let titel = 'Kalibratie gesynchroniseerd';
-      let tekst = `Bunkergegevens geladen (${importedMaterials.length} grondstoffen gevonden)`;
+      let tekst = `Bunkergegevens geladen uit Supabase (${importedMaterials.length} grondstoffen gevonden)`;
       let type: 'ok' | 'info' | 'fout' = 'ok';
       let icon = 'INFO';
 
-      const totalBunkers = Object.values(importedBunkers).reduce((acc, curr) => acc + curr.length, 0);
+      const totalBunkers = Object.values(nextBunkers).reduce((acc, curr) => acc + curr.length, 0);
 
       if (totalBunkers === 0 && importedMaterials.length > 0) {
         titel = 'Grondstoffen geladen';
@@ -809,11 +788,11 @@ export default function App() {
         icon = 'INFO';
       } else if (totalBunkers === 0 && importedMaterials.length === 0) {
         titel = 'Geen data gevonden';
-        tekst = 'Geen bunkers of grondstoffen gevonden in de sheets. Controleer de tabblad-namen en kolomkoppen.';
+        tekst = 'Geen bunkers of grondstoffen gevonden in Supabase.';
         type = 'info';
         icon = 'INFO';
       } else {
-        tekst = `${totalBunkers} bunkers bijgewerkt over ${Object.keys(importedBunkers).filter(k => importedBunkers[k as unknown as LineId].length > 0).length} lijnen.`;
+        tekst = `${totalBunkers} bunkers geladen over ${Object.keys(nextBunkers).filter(k => nextBunkers[k as unknown as LineId].length > 0).length} lijnen.`;
       }
 
       const newMelding: Melding = {
