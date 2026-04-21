@@ -1966,7 +1966,7 @@ export default function App() {
     return config[lid].prep + (sw * config[lid].wissel);
   }, [bunkers, config]);
 
-  const getScheduledStartsForLine = (list: Order[], lid: LineId): Date[] => {
+  const getScheduledStartsForLine = useCallback((list: Order[], lid: LineId): Date[] => {
     const starts: Date[] = [];
     const cfg = config[lid];
     const lineBunkers = bunkers[lid];
@@ -2028,7 +2028,7 @@ export default function App() {
     });
 
     return starts;
-  };
+  }, [bunkers, config, lineTiming, effectiveFirstOrderStart, getTransitionMinutes, getEffectivePriority, getOrderLoadReferenceTime]);
 
   const getLinePlanCursor = useCallback((list: Order[], lid: LineId) => {
     const cfg = config[lid];
