@@ -455,7 +455,13 @@ export default function App() {
   }, [dataSource]);
 
   useEffect(() => {
-    localStorage.setItem('kd_orders', JSON.stringify(orders));
+    const timeoutId = window.setTimeout(() => {
+      localStorage.setItem('kd_orders', JSON.stringify(orders));
+    }, 1500);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [orders]);
 
   useEffect(() => {
