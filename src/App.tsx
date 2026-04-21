@@ -795,7 +795,6 @@ export default function App() {
         let finalCalibrationRows: SharedBunkerMaterialRow[] = [];
 
         if (isSupabaseConfigured() && hasBunkers) {
-          await writeBunkersToSupabase(nextBunkers);
           await writeBunkerMaterialsToSupabase(nextBunkers);
           finalCalibrationRows = await fetchBunkerMaterialsFromSupabase();
         }

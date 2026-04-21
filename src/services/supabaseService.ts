@@ -579,27 +579,12 @@ export async function writeBunkersToSupabase(bunkersByLine: Record<LineId, Bunke
   for (const row of rows) {
     const key = `${row.line_id}|${row.bunker_code}`;
     const existing = existingByKey.get(key);
-    if (existing?.id) {
-      await supabasePatch(
-        `shared_bunker_state?id=eq.${encodeURIComponent(existing.id)}`,
-        {
-          current_material: row.material_name,
-          current_material_code: row.material_code,
-          fixed: row.is_fixed,
-          material_code: row.material_code,
-          material_name: row.material_name,
-          is_fixed: row.is_fixed,
-          must_empty: row.must_empty,
-          empty_after_order: row.empty_after_order,
-          updated_at: row.updated_at
-        }
-      );
-    } else {
+    if (!existing?.id) {
       await supabaseInsert('shared_bunker_state', {
-        ...row,
-        current_material: row.material_name,
-        current_material_code: row.material_code,
-        fixed: row.is_fixed
+        workspace: row.workspace,
+        line_id: row.line_id,
+        bunker_code: row.bunker_code,
+        updated_at: row.updated_at
       });
       existingByKey.set(key, { ...row, id: null });
     }
