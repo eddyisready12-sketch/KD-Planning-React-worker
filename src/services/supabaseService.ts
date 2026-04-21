@@ -469,15 +469,21 @@ export async function writeOrdersToSupabase(orders: Order[], options?: { preserv
     uniqueOrders.set(`${SUPABASE_WORKSPACE}|${getSharedOrderKey(order)}`, order);
   });
 
-  const existingRows = await supabaseFetch<Array<Pick<SharedOrderRow, 'id' | 'order_num' | 'rit_num' | 'recipe' | 'line_id' | 'production_order' | 'order_date'>>>(
-    `shared_orders?workspace=eq.${encodeURIComponent(SUPABASE_WORKSPACE)}&select=id,order_num,rit_num,recipe,line_id,production_order,order_date`
+  const existingRows = await supabaseFetch<Array<Pick<SharedOrderRow, 'id' | 'order_num' | 'rit_num' | 'recipe' | 'line_id' | 'production_order' | 'order_date' | 'updated_at'>>>(
+    `shared_orders?workspace=eq.${encodeURIComponent(SUPABASE_WORKSPACE)}&select=id,order_num,rit_num,recipe,line_id,production_order,order_date,updated_at`
   );
-  const existingByOrderKey = new Map<string, Pick<SharedOrderRow, 'id' | 'order_date'>>();
+  const existingByOrderKey = new Map<string, Array<Pick<SharedOrderRow, 'id' | 'order_date' | 'updated_at'>>>();
   existingRows.forEach(row => {
     const orderKey = getSharedOrderRowKey(row);
     if (orderKey && row.id) {
-      existingByOrderKey.set(orderKey, { id: row.id, order_date: row.order_date });
+      const rowsForKey = existingByOrderKey.get(orderKey) || [];
+      rowsForKey.push({ id: row.id, order_date: row.order_date, updated_at: row.updated_at });
+      existingByOrderKey.set(orderKey, rowsForKey);
     }
+  });
+  existingByOrderKey.forEach((rowsForKey, orderKey) => {
+    rowsForKey.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+    existingByOrderKey.set(orderKey, rowsForKey);
   });
 
   const orderRows = Array.from(uniqueOrders.values()).map(order => {
@@ -486,7 +492,7 @@ export async function writeOrdersToSupabase(orders: Order[], options?: { preserv
         ? 1
         : (order.status === 'arrived' && !!normalizeEta(order.arrivedTime || order.eta) ? 1 : 2);
     const orderKey = getSharedOrderKey(order);
-    const existingRow = existingByOrderKey.get(orderKey);
+    const existingRow = existingByOrderKey.get(orderKey)?.[0];
     const preservedOrderDate =
       (options?.preserveExistingSchedule ? existingRow?.order_date : null) || order.date || null;
     const productionOrder = String(order.productionOrder || '').trim() || null;
@@ -517,12 +523,35 @@ export async function writeOrdersToSupabase(orders: Order[], options?: { preserv
   });
 
   for (const row of orderRows) {
-    const existingRow = existingByOrderKey.get(getSharedOrderRowKey(row));
+    const rowsForKey = existingByOrderKey.get(getSharedOrderRowKey(row)) || [];
+    const existingRow = rowsForKey[0];
     if (existingRow?.id) {
       await supabasePatch(`shared_orders?id=eq.${encodeURIComponent(existingRow.id)}`, row);
+      const duplicateIds = rowsForKey
+        .slice(1)
+        .map(existing => String(existing.id || '').trim())
+        .filter(Boolean);
+      if (duplicateIds.length > 0) {
+        const { error } = await supabase
+          .from('shared_orders')
+          .delete()
+          .in('id', duplicateIds);
+        if (error) {
+          throw new Error(`Dubbele orders opschonen mislukt: ${error.message}`);
+        }
+      }
+      existingByOrderKey.set(getSharedOrderRowKey(row), [{
+        id: existingRow.id,
+        order_date: row.order_date,
+        updated_at: row.updated_at
+      }]);
     } else {
       await supabaseInsert('shared_orders', row);
-      existingByOrderKey.set(getSharedOrderRowKey(row), { id: null, order_date: row.order_date });
+      existingByOrderKey.set(getSharedOrderRowKey(row), [{
+        id: null,
+        order_date: row.order_date,
+        updated_at: row.updated_at
+      }]);
     }
   }
 }
