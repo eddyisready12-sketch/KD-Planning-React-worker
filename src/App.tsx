@@ -3240,8 +3240,12 @@ export default function App() {
 
     return base.sort((a, b) => {
       if (plannerSort === 'eta') {
-        const etaA = etaToMins(normalizeEta(a.eta)) || 9999;
-        const etaB = etaToMins(normalizeEta(b.eta)) || 9999;
+        const etaA = a.pkg === 'bulk' && a.status !== 'arrived'
+          ? 9999
+          : (etaToMins(normalizeEta(a.eta)) || 9999);
+        const etaB = b.pkg === 'bulk' && b.status !== 'arrived'
+          ? 9999
+          : (etaToMins(normalizeEta(b.eta)) || 9999);
         return etaA - etaB;
       }
       if (plannerSort === 'prio') return getEffectivePriority(a) - getEffectivePriority(b);
