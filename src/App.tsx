@@ -126,6 +126,13 @@ function getOrderRefLabel(order: Pick<Order, 'num' | 'productionOrder'>): string
     : `Order ${order.num}`;
 }
 
+function getOrderIdentityKey(order: Pick<Order, 'num' | 'rit' | 'recipe' | 'productionOrder'>): string {
+  const productionOrder = String(order.productionOrder || '').trim();
+  return productionOrder
+    ? `po:${productionOrder}`
+    : `${order.num}|${order.rit || ''}|${order.recipe || ''}`;
+}
+
 function getPkgLabel(order: Pick<Order, 'pkg'>): string {
   const pkg = normalizePkg(order.pkg);
   return pkg === 'bulk' ? 'BULK / M3' : pkg === 'bag' ? 'BAG' : pkg === 'bale' ? 'BAL' : 'PKG';
@@ -483,10 +490,7 @@ export default function App() {
         const sourceLabel = 'Supabase';
       
       setOrders(prev => {
-        const orderKey = (o: Order) => {
-          const productionOrder = String(o.productionOrder || '').trim();
-          return productionOrder ? `po:${productionOrder}` : `${o.num}|${o.rit}|${o.recipe}|${o.line}`;
-        };
+        const orderKey = (o: Order) => getOrderIdentityKey(o);
         const importedByKey = new Map(importedOrders.map(o => [orderKey(o), o]));
 
         // Behoud alleen orders die lokaal al draaien of voltooid zijn als ze niet meer in de sheet staan.
@@ -562,10 +566,7 @@ export default function App() {
 
   const mergeImportedOrdersIntoState = (importedOrders: Order[]) => {
     setOrders(prev => {
-      const orderKey = (o: Order) => {
-        const productionOrder = String(o.productionOrder || '').trim();
-        return productionOrder ? `po:${productionOrder}` : `${o.num}|${o.rit}|${o.recipe}|${o.line}`;
-      };
+      const orderKey = (o: Order) => getOrderIdentityKey(o);
       const importedByKey = new Map(importedOrders.map(o => [orderKey(o), o]));
       const completed = prev.filter(o => o.status === 'completed');
       const active = prev.filter(o => o.status === 'running');
@@ -1131,8 +1132,7 @@ export default function App() {
     if (!isSupabaseConfigured() || !supabase) return;
 
     const orderKey = (order: Pick<Order, 'num' | 'rit' | 'recipe' | 'line' | 'productionOrder'>) => {
-      const productionOrder = String(order.productionOrder || '').trim();
-      return productionOrder ? `po:${productionOrder}` : `${order.num}|${order.rit || ''}|${order.recipe || ''}|${order.line}`;
+      return getOrderIdentityKey(order);
     };
 
     const normalizeRealtimeOrderStatus = (status: unknown, arrived?: unknown): Order['status'] => {
