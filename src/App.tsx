@@ -9,7 +9,7 @@ import {
 import {
   fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, materialsMixCompatible, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides, FRACTION_MIX_MATERIAL_NAME, FRACTION_MIX_MATERIAL_CODE, isFractieMixMaterial
 } from './utils';
-import { fetchOrdersFromSheet, fetchBunkersFromSheet, importOrdersFromLocalFile, DEFAULT_BAG_VOLUME_RULES, CalibrationMaterial } from './services/sheetService';
+import { fetchBunkersFromSheet, importOrdersFromLocalFile, DEFAULT_BAG_VOLUME_RULES, CalibrationMaterial } from './services/sheetService';
 import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBagVolumeRulesFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriversFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, setDriverActiveInSupabase, upsertDriverInSupabase, writeBagVolumeRulesToSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow, type SharedDriver } from './services/supabaseService';
 import { supabase } from './services/supabaseClient';
 import { 
@@ -488,22 +488,8 @@ export default function App() {
     const silent = options?.silent === true;
     setDataSource(prev => ({ ...prev, loading: true, error: null }));
       try {
-        let importedOrders: Order[] = [];
-        let sourceLabel = 'Google Sheets';
-        if (isSupabaseConfigured()) {
-          const sheetOrders = await fetchOrdersFromSheet(dataSource.sheetUrl);
-          if (sheetOrders.length > 0) {
-            await writeOrdersToSupabase(sheetOrders, { preserveExistingSchedule: true });
-          }
-          importedOrders = await fetchOrdersFromSupabase();
-          sourceLabel = 'Supabase';
-          if (sheetOrders.length > 0 && importedOrders.length === 0) {
-            throw new Error('Sync naar Supabase gaf geen orders terug.');
-          }
-        } else {
-          importedOrders = await fetchOrdersFromSheet(dataSource.sheetUrl);
-          sourceLabel = 'Google Sheets';
-        }
+        const importedOrders = await fetchOrdersFromSupabase();
+        const sourceLabel = 'Supabase';
       
       setOrders(prev => {
         const orderKey = (o: Order) => {
@@ -556,7 +542,7 @@ export default function App() {
           titel: importedOrders.length > 0 ? 'Orders gesynchroniseerd' : 'Geen orders gevonden',
           tekst: importedOrders.length > 0 
             ? `${importedOrders.length} orders geladen uit ${sourceLabel}`
-            : 'Geen geldige orders gevonden in de sheet. Controleer de kolomkoppen en tabblad-namen.',
+            : 'Geen geldige orders gevonden in Supabase.',
           lijn: null,
           orderNum: null,
           tijd: new Date(),
