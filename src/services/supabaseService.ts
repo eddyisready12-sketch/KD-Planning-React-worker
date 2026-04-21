@@ -27,6 +27,7 @@ type SharedOrderRow = {
   note?: string | null;
   priority?: number | string | null;
   y_zeile?: string | null;
+  updated_at?: string | null;
 };
 
 type SharedRecipeComponentRow = {
@@ -222,7 +223,7 @@ function stableOrderHash(key: string): number {
 function getSharedOrderKey(order: Pick<Order, 'num' | 'rit' | 'recipe' | 'line' | 'productionOrder'>): string {
   const productionOrder = String(order.productionOrder || '').trim();
   if (productionOrder) return `po:${productionOrder}`;
-  return [order.num, order.rit || '', order.recipe || '', order.line].join('|');
+  return [order.num, order.rit || '', order.recipe || ''].join('|');
 }
 
 function getSharedOrderRowKey(row: Pick<SharedOrderRow, 'order_num' | 'rit_num' | 'recipe' | 'line_id' | 'production_order'>): string {
@@ -231,8 +232,7 @@ function getSharedOrderRowKey(row: Pick<SharedOrderRow, 'order_num' | 'rit_num' 
   return [
     String(row.order_num || '').trim(),
     String(row.rit_num || '').trim(),
-    String(row.recipe || '').trim(),
-    String(row.line_id || '').trim()
+    String(row.recipe || '').trim()
   ].join('|');
 }
 
@@ -438,7 +438,7 @@ export async function fetchOrdersFromSupabase(): Promise<Order[]> {
     addUnique(componentsByRecipeSuffix, getRecipeSuffix(recipeCode));
   });
 
-  return orders
+  const mappedOrders = orders
     .map(row => {
       const recipeCode = normalizeRecipeKey(row.recipe);
       const recipeLibraryComponents =
@@ -452,6 +452,13 @@ export async function fetchOrdersFromSupabase(): Promise<Order[]> {
       );
     })
     .filter((order): order is Order => order !== null);
+
+  const dedupedOrders = new Map<string, Order>();
+  mappedOrders.forEach(order => {
+    dedupedOrders.set(getSharedOrderKey(order), order);
+  });
+
+  return Array.from(dedupedOrders.values());
 }
 
 export async function writeOrdersToSupabase(orders: Order[], options?: { preserveExistingSchedule?: boolean }): Promise<void> {
