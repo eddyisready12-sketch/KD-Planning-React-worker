@@ -445,6 +445,7 @@ export default function App() {
     return defaultData;
   });
   const [notifications, setNotifications] = useState<Melding[]>([]);
+  const [calibrationMaterials, setCalibrationMaterials] = useState<CalibrationMaterial[]>([]);
   const {
     orders,
     setOrders,
@@ -453,6 +454,31 @@ export default function App() {
     persistSingleOrder,
     mergeImportedOrdersIntoState
   } = useOrders({ setDataSource, setNotifications });
+  const {
+    bunkers,
+    setBunkers,
+    refreshBunkersFromSupabase,
+    handleBunkerUpdate
+  } = useBunkers({ orders, calibrationMaterials, setCalibrationMaterials, setNotifications });
+  const {
+    sharedDrivers,
+    setSharedDrivers,
+    sharedDriverNames,
+    setSharedDriverNames,
+    refreshDriversFromSupabase,
+    handleAddDriver,
+    handleToggleDriverAbsent
+  } = useDrivers({
+    setNotifications,
+    setSelectedDriverName,
+    setNewDriverName,
+    setNewDriverForm,
+    setShowDriverForm,
+    setIsSavingDriver,
+    setDriverSyncDebug,
+    emptyDriverForm: EMPTY_DRIVER_FORM,
+    newDriverForm
+  });
   const plannerLockOwnerRef = useRef(`planner-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
 
   useEffect(() => {
@@ -1113,37 +1139,11 @@ export default function App() {
   const [etaEditOrder, setEtaEditOrder] = useState<Order | null>(null);
   const [etaEditTime, setEtaEditTime] = useState('');
   const [selectedBunker, setSelectedBunker] = useState<{ lid: LineId, bunker: Bunker } | null>(null);
-  const [calibrationMaterials, setCalibrationMaterials] = useState<CalibrationMaterial[]>([]);
   const [showAllMaterials, setShowAllMaterials] = useState(false);
   const [newCalibrationName, setNewCalibrationName] = useState('');
   const [newCalibrationCode, setNewCalibrationCode] = useState('');
   const [newCalibrationValue, setNewCalibrationValue] = useState('');
   const [isSavingCalibration, setIsSavingCalibration] = useState(false);
-  const {
-    bunkers,
-    setBunkers,
-    refreshBunkersFromSupabase,
-    handleBunkerUpdate
-  } = useBunkers({ orders, calibrationMaterials, setCalibrationMaterials, setNotifications });
-  const {
-    sharedDrivers,
-    setSharedDrivers,
-    sharedDriverNames,
-    setSharedDriverNames,
-    refreshDriversFromSupabase,
-    handleAddDriver,
-    handleToggleDriverAbsent
-  } = useDrivers({
-    setNotifications,
-    setSelectedDriverName,
-    setNewDriverName,
-    setNewDriverForm,
-    setShowDriverForm,
-    setIsSavingDriver,
-    setDriverSyncDebug,
-    emptyDriverForm: EMPTY_DRIVER_FORM,
-    newDriverForm
-  });
   const issueRefreshInFlight = useRef(false);
   const repairedRunningOrdersRef = useRef('');
 
