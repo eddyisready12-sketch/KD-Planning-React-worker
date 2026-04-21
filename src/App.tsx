@@ -434,12 +434,6 @@ export default function App() {
   const [dataSource, setDataSource] = useState(() => {
     const saved = localStorage.getItem('kd_datasource');
     const defaultData = {
-      sheetUrl: 'https://docs.google.com/spreadsheets/d/1Byj_fUun6JMpbiv8WJKi1jnWIuQlRpsbMEpugxc2zC8/edit?gid=0#gid=0',
-      calibrationUrls: {
-        1: 'https://docs.google.com/spreadsheets/d/17aCk5YCMQDb93r6oseFlGG04V-IRTbEEdAByGRFF0Zc/edit?gid=0',
-        2: 'https://docs.google.com/spreadsheets/d/17aCk5YCMQDb93r6oseFlGG04V-IRTbEEdAByGRFF0Zc/edit?gid=829830734',
-        3: 'https://docs.google.com/spreadsheets/d/17aCk5YCMQDb93r6oseFlGG04V-IRTbEEdAByGRFF0Zc/edit?gid=1856803997'
-      },
       lastSync: null as string | null,
       loading: false,
       error: null as string | null
@@ -447,15 +441,6 @@ export default function App() {
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        // Migratie: als er nog een oude calibrationUrl is, of als de URLs de generieke link zijn, herstel naar defaults
-        const genericUrl = 'https://docs.google.com/spreadsheets/d/1Byj_fUun6JMpbiv8WJKi1jnWIuQlRpsbMEpugxc2zC8/edit?gid=0#gid=0';
-        
-        if (parsed.calibrationUrl || !parsed.calibrationUrls || 
-            Object.values(parsed.calibrationUrls).some(url => url === genericUrl)) {
-          parsed.calibrationUrls = { ...defaultData.calibrationUrls };
-          delete parsed.calibrationUrl;
-        }
-        
         return { ...defaultData, ...parsed, loading: false };
       } catch (e) {
         return defaultData;
@@ -1041,7 +1026,7 @@ export default function App() {
     }, 900000);
 
     return () => window.clearInterval(interval);
-  }, [dataSource.loading, dataSource.sheetUrl]);
+  }, [dataSource.loading]);
 
   useEffect(() => {
     if (!isSupabaseConfigured() || !supabase) return;
