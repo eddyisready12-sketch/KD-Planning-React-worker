@@ -1566,6 +1566,37 @@ export default function App() {
   const BAG_COOLDOWN_MINUTES = 90;
   const isBagPkg = (order: Order | null) => order?.pkg?.toLowerCase() === 'bag';
 
+  const getEffectivePriority = useCallback((order: Order): 1 | 2 | 3 => {
+    const nowMinutes = planningTime.getHours() * 60 + planningTime.getMinutes();
+    const nowOperationalMinutes = nowMinutes - (5 * 60);
+    const pkg = normalizePkg(order.pkg);
+    if (priorityOnePackages.has(pkg)) return 1;
+    if (pkg === 'bulk') {
+      if (order.status === 'arrived' && order.holdLoadTime) return 1;
+      const normalizedEta = getOrderLoadReferenceTime(order);
+      const etaMinutes = etaToMins(normalizedEta);
+      const loadWindowOpen = etaMinutes !== null && nowOperationalMinutes >= etaMinutes - 30;
+      return order.status === 'arrived' && loadWindowOpen ? 1 : 2;
+    }
+    return [1, 2, 3].includes(order.prio) ? order.prio : 2;
+  }, [getOrderLoadReferenceTime, planningTime, priorityOnePackages]);
+
+  const {
+    plannedOrderIdsByLine,
+    setPlannedOrderIdsByLine,
+    getScheduledStartsForLine,
+    getTransitionMinutes,
+    fillSimpleSingleGapWithinLine
+  } = usePlanner({
+    bunkers,
+    config,
+    lineTiming,
+    effectiveFirstOrderStart,
+    getOrderLoadReferenceTime,
+    getEffectivePriority,
+    setGapDebug
+  });
+
   const getLinePlanCursor = useCallback((list: Order[], lid: LineId) => {
     const cfg = config[lid];
     const lineBunkers = bunkers[lid];
@@ -1809,37 +1840,6 @@ export default function App() {
     calibrationMaterials.forEach(m => merged.set(m.name, m));
     return Array.from(merged.values());
   }, [planningMaterials, calibrationMaterials]);
-
-  const getEffectivePriority = useCallback((order: Order): 1 | 2 | 3 => {
-    const nowMinutes = planningTime.getHours() * 60 + planningTime.getMinutes();
-    const nowOperationalMinutes = nowMinutes - (5 * 60);
-    const pkg = normalizePkg(order.pkg);
-    if (priorityOnePackages.has(pkg)) return 1;
-    if (pkg === 'bulk') {
-      if (order.status === 'arrived' && order.holdLoadTime) return 1;
-      const normalizedEta = getOrderLoadReferenceTime(order);
-      const etaMinutes = etaToMins(normalizedEta);
-      const loadWindowOpen = etaMinutes !== null && nowOperationalMinutes >= etaMinutes - 30;
-      return order.status === 'arrived' && loadWindowOpen ? 1 : 2;
-    }
-    return [1, 2, 3].includes(order.prio) ? order.prio : 2;
-  }, [getOrderLoadReferenceTime, planningTime, priorityOnePackages]);
-
-  const {
-    plannedOrderIdsByLine,
-    setPlannedOrderIdsByLine,
-    getScheduledStartsForLine,
-    getTransitionMinutes,
-    fillSimpleSingleGapWithinLine
-  } = usePlanner({
-    bunkers,
-    config,
-    lineTiming,
-    effectiveFirstOrderStart,
-    getOrderLoadReferenceTime,
-    getEffectivePriority,
-    setGapDebug
-  });
 
   const getLoadHoldSequenceRank = useCallback((order: Order): number => {
     const normalizedEta = normalizeEta(order.eta);
