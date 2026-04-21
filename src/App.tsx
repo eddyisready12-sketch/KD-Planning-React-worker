@@ -2028,7 +2028,7 @@ export default function App() {
     });
 
     return starts;
-  }, [bunkers, config, lineTiming, effectiveFirstOrderStart, getTransitionMinutes, getEffectivePriority, getOrderLoadReferenceTime]);
+  }, [bunkers, config, lineTiming, effectiveFirstOrderStart, getTransitionMinutes, getOrderLoadReferenceTime]);
 
   const getLinePlanCursor = useCallback((list: Order[], lid: LineId) => {
     const cfg = config[lid];
