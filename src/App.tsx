@@ -856,6 +856,7 @@ export default function App() {
     try {
       const sharedRows = await fetchBunkerStateFromSupabase();
       const sharedCalibrationRows = await fetchBunkerMaterialsFromSupabase();
+      let mergedCalibration: ReturnType<typeof mergeSharedCalibrationIntoBunkers> | null = null;
       setBunkers(prev => {
         const next = { ...prev };
         ([1, 2, 3] as LineId[]).forEach(lid => {
@@ -875,11 +876,11 @@ export default function App() {
             };
           });
         });
-        return mergeSharedCalibrationIntoBunkers(next, sharedCalibrationRows).bunkers;
+        mergedCalibration = mergeSharedCalibrationIntoBunkers(next, sharedCalibrationRows);
+        return mergedCalibration.bunkers;
       });
-      const mergedMaterials = mergeSharedCalibrationIntoBunkers(INITIAL_BUNKERS, sharedCalibrationRows).materials;
-      if (mergedMaterials.length > 0) {
-        setCalibrationMaterials(mergedMaterials);
+      if (mergedCalibration && mergedCalibration.materials.length > 0) {
+        setCalibrationMaterials(mergedCalibration.materials);
       }
     } catch {
       // keep current local state if supabase refresh fails
