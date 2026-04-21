@@ -1124,15 +1124,70 @@ export default function App() {
   useEffect(() => {
     if (!isSupabaseConfigured() || !supabase) return;
 
+    const orderKey = (order: Pick<Order, 'num' | 'rit' | 'recipe' | 'line' | 'productionOrder'>) => {
+      const productionOrder = String(order.productionOrder || '').trim();
+      return productionOrder ? `po:${productionOrder}` : `${order.num}|${order.rit || ''}|${order.recipe || ''}|${order.line}`;
+    };
+
+    const normalizeRealtimeOrderStatus = (status: unknown, arrived?: unknown): Order['status'] => {
+      const normalized = String(status || '').trim().toLowerCase();
+      if (normalized === 'closed' || normalized === 'completed' || normalized === 'voltooid') return 'completed';
+      if (normalized === 'running' || normalized === 'gestart') return 'running';
+      if (normalized === 'arrived' || normalized === 'gearriveerd' || arrived === true) return 'arrived';
+      return 'planned';
+    };
+
+    const mapRealtimeOrderRow = (row: Record<string, unknown> | null | undefined): Order | null => {
+      if (!row) return null;
+      const orderNum = String(row.order_num || '').trim();
+      const recipe = String(row.recipe || '').trim();
+      if (!orderNum || !recipe) return null;
+
+      const rawLine = parseInt(String(row.line_id ?? '').replace(/[^0-9]/g, ''), 10);
+      const line: LineId = ([1, 2, 3].includes(rawLine) ? rawLine : 1) as LineId;
+      const pkg = normalizePkg(String(row.pkg || ''));
+      const status = normalizeRealtimeOrderStatus(row.status, row.arrived);
+      const eta = normalizeEta(String(row.eta || ''));
+      const arrivedTime = normalizeEta(String(row.arrived_time || '')) || undefined;
+      const priority = parseInt(String(row.priority ?? ''), 10);
+      const normalizedPriority: 1 | 2 | 3 =
+        pkg === 'bale' || pkg === 'bag'
+          ? 1
+          : (status === 'arrived' && !!normalizeEta(String(row.arrived_time || row.eta || ''))
+              ? 1
+              : ([1, 2, 3].includes(priority) ? (priority as 1 | 2 | 3) : 2));
+
+      return {
+        id: 0,
+        num: orderNum,
+        rit: String(row.rit_num || ''),
+        productionOrder: String(row.production_order || '').trim() || undefined,
+        customer: String(row.customer || 'Onbekende klant'),
+        recipe,
+        line,
+        vol: Number.isFinite(Number(row.volume)) ? Number(row.volume) : 0,
+        pkg,
+        prio: normalizedPriority,
+        status,
+        rawStatus: String(row.status || ''),
+        arrived: row.arrived === true || status === 'arrived',
+        eta,
+        arrivedTime,
+        startedAt: row.started_at ? String(row.started_at) : undefined,
+        holdLoadTime: row.hold_load_time === true,
+        note: String(row.note || ''),
+        driver: row.driver_name ? String(row.driver_name) : undefined,
+        yZeile: row.y_zeile ? String(row.y_zeile) : undefined,
+        date: row.order_date ? String(row.order_date) : undefined,
+        components: []
+      };
+    };
+
     const refreshOrdersFromSupabase = async () => {
       try {
         const sharedOrders = await fetchOrdersFromSupabase();
         if (sharedOrders.length > 0) {
           setOrders(prev => {
-            const orderKey = (o: Order) => {
-              const productionOrder = String(o.productionOrder || '').trim();
-              return productionOrder ? `po:${productionOrder}` : `${o.num}|${o.rit}|${o.recipe}|${o.line}`;
-            };
             const prevByKey = new Map(prev.map(o => [orderKey(o), o]));
             return sharedOrders.map(order => {
               const existing = prevByKey.get(orderKey(order));
@@ -1163,7 +1218,56 @@ export default function App() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'shared_orders' },
-        refreshOrdersFromSupabase
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            void refreshOrdersFromSupabase();
+            return;
+          }
+
+          if (payload.eventType === 'UPDATE') {
+            const updatedOrder = mapRealtimeOrderRow(payload.new as Record<string, unknown>);
+            if (!updatedOrder) return;
+
+            setOrders(prev => {
+              const next = prev.slice();
+              const nextKey = orderKey(updatedOrder);
+              const existingIndex = next.findIndex(order => orderKey(order) === nextKey);
+              if (existingIndex === -1) {
+                next.push(updatedOrder);
+                return next;
+              }
+
+              const existing = next[existingIndex];
+              const keepLocalRunning = existing.status === 'running' && !updatedOrder.startedAt;
+              const keepLocalArrived = existing.status === 'arrived' && !updatedOrder.arrivedTime;
+              next[existingIndex] = {
+                ...updatedOrder,
+                status: keepLocalRunning ? existing.status : updatedOrder.status,
+                arrived: keepLocalRunning ? existing.arrived : keepLocalArrived ? existing.arrived : updatedOrder.arrived,
+                arrivedTime: keepLocalRunning ? (existing.arrivedTime || updatedOrder.arrivedTime) : keepLocalArrived ? (existing.arrivedTime || updatedOrder.arrivedTime) : updatedOrder.arrivedTime,
+                startedAt: keepLocalRunning ? (existing.startedAt || updatedOrder.startedAt) : updatedOrder.startedAt,
+                holdLoadTime: keepLocalRunning || keepLocalArrived ? !!existing.holdLoadTime : !!updatedOrder.holdLoadTime,
+                eta: keepLocalRunning ? (existing.eta || updatedOrder.eta) : updatedOrder.eta
+              };
+              return next;
+            });
+            return;
+          }
+
+          if (payload.eventType === 'DELETE') {
+            const deletedOrder = payload.old as Record<string, unknown> | null;
+            if (!deletedOrder) return;
+            const deletedLine = parseInt(String(deletedOrder.line_id ?? '').replace(/[^0-9]/g, ''), 10);
+            const deletedKey = orderKey({
+              num: String(deletedOrder.order_num || ''),
+              rit: String(deletedOrder.rit_num || ''),
+              recipe: String(deletedOrder.recipe || ''),
+              line: ([1, 2, 3].includes(deletedLine) ? deletedLine : 1) as LineId,
+              productionOrder: String(deletedOrder.production_order || '').trim() || undefined
+            });
+            setOrders(prev => prev.filter(order => orderKey(order) !== deletedKey));
+          }
+        }
       )
       .subscribe();
 
