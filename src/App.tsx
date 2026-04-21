@@ -10,7 +10,7 @@ import {
   fmt, ev, rt, sl, normalizeEta, normalizePkg, materialsEquivalent, materialCodesEquivalent, materialsMixCompatible, canUseExistingMaterialForRequested, swCount, getSwitchMaterials, etaToMins, hasProlineCleaningTrigger, setRuntimeMaterialOverrides, FRACTION_MIX_MATERIAL_NAME, FRACTION_MIX_MATERIAL_CODE, isFractieMixMaterial
 } from './utils';
 import { importOrdersFromLocalFile, DEFAULT_BAG_VOLUME_RULES, CalibrationMaterial } from './services/sheetService';
-import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBagVolumeRulesFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchDriversFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, setDriverActiveInSupabase, upsertDriverInSupabase, writeBagVolumeRulesToSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow, type SharedDriver } from './services/supabaseService';
+import { acquirePlannerRecalcLockInSupabase, deleteAllOrdersFromSupabase, fetchBagVolumeRulesFromSupabase, fetchBunkerMaterialsFromSupabase, fetchBunkerStateFromSupabase, fetchIssuesFromSupabase, fetchOrdersFromSupabase, fetchPlannedOrderIdsFromSupabase, fetchPlannerRecalcLockFromSupabase, fetchPlannerTriggersFromSupabase, isSupabaseConfigured, releasePlannerRecalcLockInSupabase, resolveIssueInSupabase, writeBagVolumeRulesToSupabase, writeBunkerMaterialsToSupabase, writeBunkersToSupabase, writeDriverListToSupabase, writeIssueToSupabase, writeOrdersToSupabase, writePlannedOrderIdsToSupabase, writeSingleBunkerToSupabase, type PlannerRecalcLockState, type SharedBunkerMaterialRow } from './services/supabaseService';
 import { supabase } from './services/supabaseClient';
 import { 
   LayoutDashboard, ClipboardList, Database, Settings, Bell, 
@@ -18,6 +18,10 @@ import {
   Wrench, AlertTriangle, Check, Clock, Pencil, RefreshCw, Package, Shuffle, Info
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { useOrders } from './hooks/useOrders';
+import { useBunkers } from './hooks/useBunkers';
+import { useDrivers } from './hooks/useDrivers';
+import { usePlanner } from './hooks/usePlanner';
 
 type LineTimingSettings = {
   dayStart: string;
@@ -370,23 +374,12 @@ export default function App() {
   const [chauffeurTypeFilter, setChauffeurTypeFilter] = useState<'all' | 'bulk' | 'packed'>('all');
   const [chauffeurActionFilter, setChauffeurActionFilter] = useState<'all' | 'unassigned' | 'conflicts'>('all');
   const [chauffeurSearch, setChauffeurSearch] = useState('');
-  const [plannedOrderIdsByLine, setPlannedOrderIdsByLine] = useState<Record<LineId, number[]> | null>(() => {
-    const saved = localStorage.getItem('kd_planned_order_ids_by_line');
-    if (!saved) return null;
-    try {
-      return JSON.parse(saved);
-    } catch {
-      return null;
-    }
-  });
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [plannerRecalcLock, setPlannerRecalcLock] = useState<PlannerRecalcLockState | null>(null);
   const [gapDebug, setGapDebug] = useState<GapDebugEntry[]>([]);
   const [selectedDriverName, setSelectedDriverName] = useState<string>('');
   const [draggedDriverName, setDraggedDriverName] = useState<string>('');
   const [draggedDayRosterOrderId, setDraggedDayRosterOrderId] = useState<number | null>(null);
-  const [sharedDriverNames, setSharedDriverNames] = useState<string[]>([]);
-  const [sharedDrivers, setSharedDrivers] = useState<SharedDriver[]>([]);
   const [plannerTriggers, setPlannerTriggers] = useState<PlannerTrigger[]>([]);
   const [newDriverName, setNewDriverName] = useState('');
   const [showDriverForm, setShowDriverForm] = useState(false);
@@ -434,10 +427,6 @@ export default function App() {
   const [bagVolumeRuleDrafts, setBagVolumeRuleDrafts] = useState<BagVolumeRule[]>(DEFAULT_BAG_VOLUME_RULES);
   const [isSavingBagVolumeRules, setIsSavingBagVolumeRules] = useState(false);
   const [bagVolumeRuleFeedback, setBagVolumeRuleFeedback] = useState<{ type: 'ok' | 'error' | 'busy'; text: string } | null>(null);
-  const [orders, setOrders] = useState<Order[]>(() => {
-    const saved = localStorage.getItem('kd_orders');
-    return saved ? JSON.parse(saved) : [];
-  });
   const [dataSource, setDataSource] = useState(() => {
     const saved = localStorage.getItem('kd_datasource');
     const defaultData = {
@@ -455,6 +444,15 @@ export default function App() {
     }
     return defaultData;
   });
+  const [notifications, setNotifications] = useState<Melding[]>([]);
+  const {
+    orders,
+    setOrders,
+    laadOrders,
+    persistOrders,
+    persistSingleOrder,
+    mergeImportedOrdersIntoState
+  } = useOrders({ setDataSource, setNotifications });
   const plannerLockOwnerRef = useRef(`planner-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
 
   useEffect(() => {
@@ -462,143 +460,8 @@ export default function App() {
   }, [dataSource]);
 
   useEffect(() => {
-    const timeoutId = window.setTimeout(() => {
-      localStorage.setItem('kd_orders', JSON.stringify(orders));
-    }, 1500);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [orders]);
-
-  useEffect(() => {
     localStorage.setItem('kd_selected_line', selectedLine.toString());
   }, [selectedLine]);
-
-  useEffect(() => {
-    if (plannedOrderIdsByLine) {
-      localStorage.setItem('kd_planned_order_ids_by_line', JSON.stringify(plannedOrderIdsByLine));
-    }
-  }, [plannedOrderIdsByLine]);
-
-
-  const laadOrders = async (options?: { silent?: boolean }) => {
-    const silent = options?.silent === true;
-    setDataSource(prev => ({ ...prev, loading: true, error: null }));
-      try {
-        const importedOrders = await fetchOrdersFromSupabase();
-        const sourceLabel = 'Supabase';
-      
-      setOrders(prev => {
-        const orderKey = (o: Order) => getOrderIdentityKey(o);
-        const importedByKey = new Map(importedOrders.map(o => [orderKey(o), o]));
-
-        // Behoud alleen orders die lokaal al draaien of voltooid zijn als ze niet meer in de sheet staan.
-        const completed = prev.filter(o => o.status === 'completed');
-        const active = prev.filter(o => o.status === 'running');
-        const preserved = [...completed, ...active].filter(o => !importedByKey.has(orderKey(o)));
-        const prevByKey = new Map(prev.map(o => [orderKey(o), o]));
-
-        const mergedImported = importedOrders.map(imported => {
-          const existing = prevByKey.get(orderKey(imported));
-          if (!existing) return imported;
-
-          const sheetSaysArrived = imported.status === 'arrived' || imported.arrived === true;
-          const keepLocalRunning = existing.status === 'running';
-          const keepLocalArrived = existing.status === 'arrived' && !sheetSaysArrived;
-          const keepLocalEta = (keepLocalRunning || keepLocalArrived) && !!normalizeEta(existing.eta);
-
-        return {
-          ...imported,
-          status: keepLocalRunning ? 'running' : keepLocalArrived ? 'arrived' : imported.status,
-          arrived: keepLocalRunning ? existing.arrived : keepLocalArrived ? true : imported.arrived,
-          arrivedTime: keepLocalRunning ? (existing.arrivedTime || imported.arrivedTime) : keepLocalArrived ? (existing.arrivedTime || imported.arrivedTime) : imported.arrivedTime,
-          startedAt: keepLocalRunning ? (existing.startedAt || imported.startedAt) : imported.startedAt,
-          holdLoadTime: keepLocalRunning || keepLocalArrived ? !!existing.holdLoadTime : !!imported.holdLoadTime,
-          eta: keepLocalEta ? existing.eta : imported.eta,
-          driver: existing.driver || imported.driver,
-          note: existing.note || imported.note,
-            _autoMovedReason: existing._autoMovedReason,
-            _autoMovedFromLine: existing._autoMovedFromLine,
-            _autoMovedToLine: existing._autoMovedToLine
-          };
-        });
-
-        return [...preserved, ...mergedImported];
-      });
-
-      setDataSource(prev => ({ ...prev, loading: false, lastSync: new Date().toISOString() }));
-
-      if (!silent) {
-        const newMelding: Melding = {
-          id: Date.now(),
-          type: importedOrders.length > 0 ? 'ok' : 'waarschuwing',
-          icon: importedOrders.length > 0 ? 'OK' : 'WARN',
-          titel: importedOrders.length > 0 ? 'Orders gesynchroniseerd' : 'Geen orders gevonden',
-          tekst: importedOrders.length > 0 
-            ? `${importedOrders.length} orders geladen uit ${sourceLabel}`
-            : 'Geen geldige orders gevonden in Supabase.',
-          lijn: null,
-          orderNum: null,
-          tijd: new Date(),
-          gelezen: false
-        };
-        setNotifications(prev => [newMelding, ...prev]);
-      }
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Sync mislukt';
-      setDataSource(prev => ({ ...prev, loading: false, error: errorMsg }));
-      if (!silent) {
-        setNotifications(prev => [{
-          id: Date.now(),
-          type: 'fout',
-          icon: 'ERR',
-          titel: 'Sync mislukt',
-          tekst: errorMsg,
-          lijn: null,
-          orderNum: null,
-          tijd: new Date(),
-          gelezen: false
-        }, ...prev]);
-      }
-    }
-  };
-
-  const mergeImportedOrdersIntoState = (importedOrders: Order[]) => {
-    setOrders(prev => {
-      const orderKey = (o: Order) => getOrderIdentityKey(o);
-      const importedByKey = new Map(importedOrders.map(o => [orderKey(o), o]));
-      const completed = prev.filter(o => o.status === 'completed');
-      const active = prev.filter(o => o.status === 'running');
-      const preserved = [...completed, ...active].filter(o => !importedByKey.has(orderKey(o)));
-      const prevByKey = new Map(prev.map(o => [orderKey(o), o]));
-
-      const mergedImported = importedOrders.map(imported => {
-        const existing = prevByKey.get(orderKey(imported));
-        if (!existing) return imported;
-
-        const keepLocalRunning = existing.status === 'running';
-        const keepLocalArrived = existing.status === 'arrived';
-
-        return {
-          ...imported,
-          status: keepLocalRunning ? 'running' : keepLocalArrived ? 'arrived' : imported.status,
-          arrived: keepLocalRunning ? existing.arrived : keepLocalArrived ? true : imported.arrived,
-          arrivedTime: keepLocalRunning ? (existing.arrivedTime || imported.arrivedTime) : keepLocalArrived ? (existing.arrivedTime || imported.arrivedTime) : imported.arrivedTime,
-          startedAt: keepLocalRunning ? (existing.startedAt || imported.startedAt) : imported.startedAt,
-          holdLoadTime: keepLocalRunning || keepLocalArrived ? !!existing.holdLoadTime : !!imported.holdLoadTime,
-          eta: existing.eta || imported.eta,
-          driver: existing.driver || imported.driver,
-          note: existing.note || imported.note,
-          _autoMovedReason: existing._autoMovedReason,
-          _autoMovedFromLine: existing._autoMovedFromLine,
-          _autoMovedToLine: existing._autoMovedToLine
-        };
-      });
-
-      return [...preserved, ...mergedImported];
-    });
-  };
 
   const handleLocalOrderImport = async (file: File | null) => {
     if (!file) return;
@@ -855,60 +718,6 @@ export default function App() {
       setIsClearingOrders(false);
     }
   };
-
-  const refreshBunkersFromSupabase = useCallback(async () => {
-    if (!isSupabaseConfigured()) return;
-    if (bunkerRefreshInFlight.current) return;
-    bunkerRefreshInFlight.current = true;
-    try {
-      const sharedRows = await fetchBunkerStateFromSupabase();
-      const sharedCalibrationRows = await fetchBunkerMaterialsFromSupabase();
-      let mergedCalibration: ReturnType<typeof mergeSharedCalibrationIntoBunkers> | null = null;
-      setBunkers(prev => {
-        const next = { ...prev };
-        ([1, 2, 3] as LineId[]).forEach(lid => {
-          next[lid] = (next[lid] || []).map(bunker => {
-            const sharedState = sharedRows.find(row =>
-              Number(row.line_id || 0) === Number(lid) &&
-              String(row.bunker_code || '') === bunker.c
-            );
-            if (!sharedState) return bunker;
-            return {
-              ...bunker,
-              m: sharedState.current_material ?? sharedState.material_name ?? bunker.m ?? null,
-              mc: sharedState.current_material_code ?? sharedState.material_code ?? bunker.mc ?? null,
-              fx: sharedState.fixed ?? sharedState.is_fixed ?? bunker.fx ?? false,
-              mustEmpty: sharedState.must_empty ?? bunker.mustEmpty,
-              leegNaOrder: sharedState.empty_after_order ?? bunker.leegNaOrder ?? null
-            };
-          });
-        });
-        mergedCalibration = mergeSharedCalibrationIntoBunkers(next, sharedCalibrationRows);
-        return mergedCalibration.bunkers;
-      });
-      if (mergedCalibration && mergedCalibration.materials.length > 0) {
-        setCalibrationMaterials(mergedCalibration.materials);
-      }
-    } catch {
-      // keep current local state if supabase refresh fails
-    } finally {
-      bunkerRefreshInFlight.current = false;
-    }
-  }, []);
-
-  const refreshDriversFromSupabase = useCallback(async () => {
-    if (!isSupabaseConfigured()) return;
-    try {
-      const drivers = await fetchDriversFromSupabase();
-      const activeNames = drivers.filter(driver => driver.active).map(driver => driver.name);
-      setSharedDrivers(drivers);
-      setSharedDriverNames(activeNames);
-      setDriverSyncDebug(`Supabase chauffeurs: ${activeNames.length} actief, ${drivers.length - activeNames.length} afwezig`);
-    } catch {
-      setDriverSyncDebug('Supabase chauffeurs refresh mislukt');
-      // keep current local state if supabase driver refresh fails
-    }
-  }, []);
 
   const refreshPlannedOrderIdsFromSupabase = useCallback(async () => {
     if (!isSupabaseConfigured()) return;
@@ -1310,54 +1119,33 @@ export default function App() {
   const [newCalibrationCode, setNewCalibrationCode] = useState('');
   const [newCalibrationValue, setNewCalibrationValue] = useState('');
   const [isSavingCalibration, setIsSavingCalibration] = useState(false);
-  const bunkerRefreshInFlight = useRef(false);
+  const {
+    bunkers,
+    setBunkers,
+    refreshBunkersFromSupabase,
+    handleBunkerUpdate
+  } = useBunkers({ orders, calibrationMaterials, setCalibrationMaterials, setNotifications });
+  const {
+    sharedDrivers,
+    setSharedDrivers,
+    sharedDriverNames,
+    setSharedDriverNames,
+    refreshDriversFromSupabase,
+    handleAddDriver,
+    handleToggleDriverAbsent
+  } = useDrivers({
+    setNotifications,
+    setSelectedDriverName,
+    setNewDriverName,
+    setNewDriverForm,
+    setShowDriverForm,
+    setIsSavingDriver,
+    setDriverSyncDebug,
+    emptyDriverForm: EMPTY_DRIVER_FORM,
+    newDriverForm
+  });
   const issueRefreshInFlight = useRef(false);
   const repairedRunningOrdersRef = useRef('');
-
-  const handleBunkerUpdate = async (lid: LineId, bunkerCode: string, newMaterial: string | null) => {
-    const lineBunkers = [...(bunkers[lid] || [])];
-    const idx = lineBunkers.findIndex(b => b.c === bunkerCode);
-    if (idx === -1) return;
-
-    const bunker = lineBunkers[idx];
-    const isFractionMix = newMaterial === FRACTION_MIX_MATERIAL_NAME;
-    const calMat = isFractionMix ? null : calibrationMaterials.find(m => m.name === newMaterial);
-    const specificData = newMaterial && !isFractionMix ? bunker.materialData?.[newMaterial] : null;
-
-    lineBunkers[idx] = {
-      ...bunker,
-      m: newMaterial,
-      mc: isFractionMix ? FRACTION_MIX_MATERIAL_CODE : specificData?.code || calMat?.code || orders.flatMap(o => o.components).find(c => c.name === newMaterial)?.code || null,
-      calibrationValue: isFractionMix ? null : specificData?.calibrationValue ?? calMat?.calibrationValue ?? bunker.calibrationValue
-    };
-
-    const nextBunkers: Record<LineId, Bunker[]> = { ...bunkers, [lid]: lineBunkers };
-    setBunkers(nextBunkers);
-
-    if (isSupabaseConfigured()) {
-      try {
-        await writeSingleBunkerToSupabase(lid, lineBunkers[idx]);
-        await refreshBunkersFromSupabase();
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : 'Bunkerstatus sync mislukt';
-        setNotifications(prev => [{
-          id: Date.now(),
-          type: 'fout',
-          icon: 'ERR',
-          titel: 'Bunkerstatus sync mislukt',
-          tekst: errorMsg,
-          lijn: lid,
-          orderNum: null,
-          tijd: new Date(),
-          gelezen: false
-        }, ...prev]);
-        return;
-      }
-    }
-
-    setSelectedBunker(null);
-    setShowAllMaterials(false);
-  };
 
   const handleAddCalibrationToBunker = async () => {
     if (!selectedBunker) return;
@@ -1563,8 +1351,6 @@ export default function App() {
     setSelectedOrderForDetail(prev => prev?.id === etaEditOrder.id ? { ...prev, eta: confirmedEta } : prev);
     closeEtaEdit();
   };
-  const [bunkers, setBunkers] = useState<Record<LineId, Bunker[]>>(INITIAL_BUNKERS);
-  const [notifications, setNotifications] = useState<Melding[]>([]);
   const [storingen, setStoringen] = useState<Record<LineId, Storing | null>>({ 1: null, 2: null, 3: null });
   const [issueDialogType, setIssueDialogType] = useState<'storing' | 'onderhoud' | null>(null);
   const [issueDescription, setIssueDescription] = useState('');
@@ -1590,59 +1376,6 @@ export default function App() {
     }
     return fallback;
   });
-
-  async function persistOrders(
-    nextOrders: Order[],
-    errorTitle = 'Order sync mislukt',
-    line: LineId | null = null,
-    orderNum: number | null = null
-  ) {
-    setOrders(nextOrders);
-    if (!isSupabaseConfigured()) return;
-
-    try {
-      await writeOrdersToSupabase(nextOrders);
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Opslaan naar Supabase mislukt';
-      setNotifications(prev => [{
-        id: Date.now(),
-        type: 'fout',
-        icon: 'ERR',
-        titel: errorTitle,
-        tekst: errorMsg,
-        lijn: line,
-        orderNum,
-        tijd: new Date(),
-        gelezen: false
-      }, ...prev]);
-    }
-  }
-
-  async function persistSingleOrder(
-    nextOrder: Order,
-    nextOrders: Order[],
-    errorTitle = 'Order sync mislukt'
-  ) {
-    setOrders(nextOrders);
-    if (!isSupabaseConfigured()) return;
-
-    try {
-      await writeOrdersToSupabase([nextOrder]);
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Opslaan naar Supabase mislukt';
-      setNotifications(prev => [{
-        id: Date.now(),
-        type: 'fout',
-        icon: 'ERR',
-        titel: errorTitle,
-        tekst: errorMsg,
-        lijn: nextOrder.line,
-        orderNum: nextOrder.num,
-        tijd: new Date(),
-        gelezen: false
-      }, ...prev]);
-    }
-  }
 
   async function refreshIssuesFromSupabase() {
     if (!isSupabaseConfigured()) return;
@@ -1756,125 +1489,6 @@ export default function App() {
     }
   }
 
-  async function handleAddDriver() {
-    const trimmed = newDriverForm.name.trim();
-    if (!trimmed) return;
-
-    const toOptionalNumber = (value: string): number | null => {
-      const normalized = value.trim().replace(',', '.');
-      if (!normalized) return null;
-      const parsed = Number(normalized);
-      return Number.isFinite(parsed) ? parsed : null;
-    };
-
-    if (sharedDriverNames.some(name => name.toLowerCase() === trimmed.toLowerCase())) {
-      setSelectedDriverName(sharedDriverNames.find(name => name.toLowerCase() === trimmed.toLowerCase()) || trimmed);
-      setNewDriverName('');
-      setNewDriverForm(prev => ({ ...prev, name: '' }));
-      setDriverSyncDebug(`${trimmed} bestaat al in de centrale chauffeurslijst`);
-      return;
-    }
-
-    const nextNames = Array.from(new Set([...sharedDriverNames, trimmed]))
-      .sort((a, b) => a.localeCompare(b, 'nl-NL'));
-
-    setSharedDriverNames(nextNames);
-    setSharedDrivers(prev => {
-      const without = prev.filter(driver => driver.name.toLowerCase() !== trimmed.toLowerCase());
-      return [...without, { name: trimmed, active: true }].sort((a, b) => a.name.localeCompare(b.name, 'nl-NL'));
-    });
-    setSelectedDriverName(trimmed);
-    setNewDriverName('');
-    setNewDriverForm(EMPTY_DRIVER_FORM);
-    setShowDriverForm(false);
-    setIsSavingDriver(true);
-    setDriverSyncDebug(`Opslaan: ${trimmed}...`);
-
-    if (!isSupabaseConfigured()) {
-      setIsSavingDriver(false);
-      setDriverSyncDebug(`${trimmed} lokaal toegevoegd`);
-      return;
-    }
-
-    try {
-      await upsertDriverInSupabase({
-        name: trimmed,
-        company: newDriverForm.company,
-        truckPlate: newDriverForm.truckPlate,
-        trailerPlate: newDriverForm.trailerPlate,
-        vehicleHeightM: toOptionalNumber(newDriverForm.vehicleHeightM),
-        steeringAxles: toOptionalNumber(newDriverForm.steeringAxles),
-        maxWeightKg: toOptionalNumber(newDriverForm.maxWeightKg),
-        notes: newDriverForm.notes
-      });
-      const namesAfter = await fetchDriverListFromSupabase();
-      await refreshDriversFromSupabase();
-      if (!namesAfter.some(name => name.toLowerCase() === trimmed.toLowerCase())) {
-        throw new Error(`Naam niet teruggevonden in Supabase (${trimmed})`);
-      }
-      setDriverSyncDebug(`Laatste sync: ${trimmed} toegevoegd`);
-      setNotifications(prev => [{
-        id: Date.now(),
-        type: 'ok',
-        icon: 'OK',
-        titel: 'Chauffeur toegevoegd',
-        tekst: `${trimmed} staat nu in de centrale chauffeurslijst`,
-        lijn: null,
-        orderNum: null,
-        tijd: new Date(),
-        gelezen: false
-      }, ...prev]);
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Chauffeur toevoegen mislukt';
-      setDriverSyncDebug(`Opslaan mislukt: ${trimmed}`);
-      setNotifications(prev => [{
-        id: Date.now(),
-        type: 'fout',
-        icon: 'ERR',
-        titel: 'Chauffeur toevoegen mislukt',
-        tekst: errorMsg,
-        lijn: null,
-        orderNum: null,
-        tijd: new Date(),
-        gelezen: false
-      }, ...prev]);
-    } finally {
-      setIsSavingDriver(false);
-    }
-  }
-
-  async function handleToggleDriverAbsent(driverName: string, absent: boolean) {
-    const trimmed = driverName.trim();
-    if (!trimmed) return;
-
-    setSharedDrivers(prev => prev.map(driver =>
-      driver.name === trimmed ? { ...driver, active: !absent } : driver
-    ));
-    setSharedDriverNames(prev => absent ? prev.filter(name => name !== trimmed) : Array.from(new Set([...prev, trimmed])).sort((a, b) => a.localeCompare(b, 'nl-NL')));
-    setDriverSyncDebug(`${trimmed} ${absent ? 'op afwezig gezet' : 'weer beschikbaar'}`);
-
-    if (!isSupabaseConfigured()) return;
-
-    try {
-      await setDriverActiveInSupabase(trimmed, !absent);
-      await refreshDriversFromSupabase();
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Chauffeurstatus opslaan mislukt';
-      setDriverSyncDebug(`Afwezigheid sync mislukt: ${trimmed}`);
-      setNotifications(prev => [{
-        id: Date.now(),
-        type: 'fout',
-        icon: 'ERR',
-        titel: 'Chauffeurstatus sync mislukt',
-        tekst: errorMsg,
-        lijn: null,
-        orderNum: null,
-        tijd: new Date(),
-        gelezen: false
-      }, ...prev]);
-      await refreshDriversFromSupabase();
-    }
-  }
   const [lineTiming, setLineTiming] = useState<Record<LineId, LineTimingSettings>>(() => {
     const saved = localStorage.getItem('kd_line_timing');
     if (saved) {
@@ -1951,84 +1565,6 @@ export default function App() {
 
   const BAG_COOLDOWN_MINUTES = 90;
   const isBagPkg = (order: Order | null) => order?.pkg?.toLowerCase() === 'bag';
-
-  const getTransitionMinutes = useCallback((lid: LineId, prevOrder: Order | null, nextOrder: Order, lineBunkersOverride?: Bunker[]) => {
-    if (!prevOrder) return 0;
-    const lineBunkers = lineBunkersOverride || bunkers[lid];
-    const sw = swCount(prevOrder, nextOrder, lineBunkers);
-
-    if (lid === 1) {
-      const includedSwitches = 3;
-      const extraSwitches = Math.max(0, sw - includedSwitches);
-      return 15 + (extraSwitches * config[lid].wissel);
-    }
-
-    return config[lid].prep + (sw * config[lid].wissel);
-  }, [bunkers, config]);
-
-  const getScheduledStartsForLine = useCallback((list: Order[], lid: LineId): Date[] => {
-    const starts: Date[] = [];
-    const cfg = config[lid];
-    const lineBunkers = bunkers[lid];
-    const lineTimingCfg = lineTiming[lid];
-    const baseDayStart = timeStringToMinutes(lineTimingCfg?.dayStart || '05:00', 5 * 60);
-    const firstOrderStart = timeStringToMinutes(effectiveFirstOrderStart, baseDayStart + 15);
-    const speed = LINES[lid].speed;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const anchorDay = parseLocalDate(list[0]?.date) || today;
-    let current = 0;
-    let nextAllowedBagProdStart: number | null = null;
-
-      list.forEach((order, index) => {
-        const prevOrder = index > 0 ? list[index - 1] : null;
-        const transitionMinutes = getTransitionMinutes(lid, prevOrder, order, lineBunkers);
-        const slot = rt(order, speed) + transitionMinutes;
-        const orderDay = parseLocalDate(order.date) || anchorDay;
-        const dayOffsetMinutes = Math.round((orderDay.getTime() - anchorDay.getTime()) / 86400000) * 1440;
-        let startMinutes = current;
-        const eta = getOrderLoadReferenceTime(order);
-        const etaMinutes = eta ? dayOffsetMinutes + timeStringToMinutes(eta, baseDayStart) : null;
-        if (index === 0) {
-          startMinutes = dayOffsetMinutes + firstOrderStart;
-        }
-
-        startMinutes = Math.max(startMinutes, dayOffsetMinutes + firstOrderStart);
-
-        if (isBagPkg(order) && nextAllowedBagProdStart !== null) {
-          startMinutes = Math.max(startMinutes, nextAllowedBagProdStart - transitionMinutes);
-        }
-
-        if (etaMinutes !== null && index !== 0) {
-          const windowStart = etaMinutes;
-          const windowEnd = etaMinutes + (order.status === 'arrived' ? 30 : cfg.maxWait);
-          const isFixedFirstOrder = getEffectivePriority(order) === 1 && eta === effectiveFirstOrderStart;
-          const earliestPrepStart = windowStart - transitionMinutes;
-          const latestPrepStart = windowEnd - transitionMinutes;
-          if (isFixedFirstOrder) {
-            startMinutes = Math.max(startMinutes, windowStart);
-          } else if (earliestPrepStart > startMinutes) {
-            startMinutes = earliestPrepStart;
-          }
-          startMinutes = Math.min(startMinutes, latestPrepStart);
-        }
-
-      startMinutes = Math.max(startMinutes, dayOffsetMinutes + firstOrderStart);
-
-      const dt = new Date(anchorDay);
-      dt.setHours(0, 0, 0, 0);
-      dt.setMinutes(startMinutes);
-      starts.push(dt);
-      current = startMinutes + slot;
-
-      if (isBagPkg(order)) {
-        const bagEndMinutes = startMinutes + slot;
-        nextAllowedBagProdStart = bagEndMinutes + BAG_COOLDOWN_MINUTES;
-      }
-    });
-
-    return starts;
-  }, [bunkers, config, lineTiming, effectiveFirstOrderStart, getTransitionMinutes, getOrderLoadReferenceTime]);
 
   const getLinePlanCursor = useCallback((list: Order[], lid: LineId) => {
     const cfg = config[lid];
@@ -2114,278 +1650,6 @@ export default function App() {
 
   const isBagOrder = useCallback((order: Order | null) => order?.pkg?.toLowerCase() === 'bag', []);
   const isBaleOrder = useCallback((order: Order | null) => order?.pkg?.toLowerCase() === 'bale', []);
-
-  const fillSimpleSingleGapWithinLine = useCallback((lid: LineId, initialPlan: Order[]) => {
-      if (initialPlan.length < 3) return initialPlan;
-
-      let workingPlan = [...initialPlan];
-      let changed = true;
-      let passes = 0;
-      const maxPasses = 3;
-      const debugEntries: GapDebugEntry[] = [];
-
-      while (changed && passes < maxPasses) {
-        changed = false;
-        passes += 1;
-        const timeline = (() => {
-          const starts = getScheduledStartsForLine(workingPlan, lid);
-          return workingPlan.map((order, index) => {
-            const startTime = starts[index];
-            const prevOrder = index > 0 ? workingPlan[index - 1] : null;
-            const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
-            const prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
-            const endTime = new Date(prodStart.getTime() + rt(order, LINES[lid].speed) * 60000);
-            return { order, startTime, prodStart, endTime };
-          });
-        })();
-
-        for (let i = 0; i < timeline.length - 1 && !changed; i++) {
-          const current = timeline[i];
-          const next = timeline[i + 1];
-          const nextEta = normalizeEta(next.order.eta);
-          if (!nextEta) continue;
-
-          const gapMinutes = Math.round((next.startTime.getTime() - current.endTime.getTime()) / 60000);
-          if (gapMinutes < 15) continue;
-
-          let bestIdx = -1;
-          let bestRemainder = Number.POSITIVE_INFINITY;
-          let bestPrio = Number.POSITIVE_INFINITY;
-          let bestVolume = -1;
-          let bestFilledMinutes = -1;
-          let bestUtilization = -1;
-          let fallbackIdx = -1;
-          let fallbackFilledMinutes = -1;
-          let fallbackVolume = -1;
-          let fallbackRemainder = Number.POSITIVE_INFINITY;
-          const candidateDebug: GapDebugCandidate[] = [];
-
-          const evaluateGapCombination = (
-            planState: Order[],
-            afterIndex: number,
-            targetOrderId: number,
-            depthRemaining: number
-          ): { fill: number; picks: number[]; volume: number; remainder: number } => {
-            const starts = getScheduledStartsForLine(planState, lid);
-            const targetIndex = planState.findIndex(o => o.id === targetOrderId);
-            if (targetIndex <= afterIndex || targetIndex < 0) {
-              return { fill: 0, picks: [], volume: 0, remainder: 0 };
-            }
-
-            const afterOrder = planState[afterIndex];
-            const afterStart = starts[afterIndex];
-            const prevOrder = afterIndex > 0 ? planState[afterIndex - 1] : null;
-            const afterTransitionMinutes = getTransitionMinutes(lid, prevOrder, afterOrder);
-            const afterProdStart = new Date(afterStart.getTime() + afterTransitionMinutes * 60000);
-            const afterEnd = new Date(afterProdStart.getTime() + rt(afterOrder, LINES[lid].speed) * 60000);
-            const targetStart = starts[targetIndex];
-            const localGapMinutes = Math.round((targetStart.getTime() - afterEnd.getTime()) / 60000);
-
-            if (localGapMinutes < 15 || depthRemaining <= 0) {
-              return {
-                fill: 0,
-                picks: [],
-                volume: 0,
-                remainder: Math.max(localGapMinutes, 0)
-              };
-            }
-
-            const lookahead =
-              localGapMinutes >= 90 ? 22 :
-              localGapMinutes >= 60 ? 16 :
-              localGapMinutes >= 35 ? 10 :
-              6;
-
-            const candidateIndexes: number[] = [];
-            for (let idx = afterIndex + 1; idx < planState.length && candidateIndexes.length < lookahead; idx++) {
-              const candidate = planState[idx];
-              if (candidate.id === targetOrderId) continue;
-              if (candidate.status === 'running') continue;
-              candidateIndexes.push(idx);
-            }
-
-            let bestCombo = {
-              fill: 0,
-              picks: [] as number[],
-              volume: 0,
-              remainder: localGapMinutes
-            };
-
-            for (const candidateIndex of candidateIndexes) {
-              const candidate = planState[candidateIndex];
-              if (candidate.pkg === 'bulk' && candidate.status !== 'arrived') continue;
-              const neededMinutes = getTransitionMinutes(lid, afterOrder, candidate) + rt(candidate, LINES[lid].speed);
-
-              if (neededMinutes > localGapMinutes) continue;
-
-              const nextPlan = [...planState];
-              const [picked] = nextPlan.splice(candidateIndex, 1);
-              nextPlan.splice(afterIndex + 1, 0, picked);
-
-              if (!planRespectsLoadWindows(lid, nextPlan)) continue;
-
-              const recursive = evaluateGapCombination(nextPlan, afterIndex + 1, targetOrderId, depthRemaining - 1);
-              const totalFill = neededMinutes + recursive.fill;
-              const totalVolume = ev(candidate) + recursive.volume;
-              const totalPicks = [candidate.id, ...recursive.picks];
-              const totalRemainder = recursive.remainder;
-
-              if (
-                totalFill > bestCombo.fill ||
-                (totalFill === bestCombo.fill && (
-                  totalVolume > bestCombo.volume ||
-                  (totalVolume === bestCombo.volume && totalRemainder < bestCombo.remainder)
-                ))
-              ) {
-                bestCombo = {
-                  fill: totalFill,
-                  picks: totalPicks,
-                  volume: totalVolume,
-                  remainder: totalRemainder
-                };
-              }
-            }
-
-            return bestCombo;
-          };
-
-          const firstLookahead =
-            gapMinutes >= 90 ? 24 :
-            gapMinutes >= 60 ? 18 :
-            12;
-          const candidateLimit = Math.min(workingPlan.length, i + 2 + firstLookahead);
-          for (let j = i + 2; j < candidateLimit; j++) {
-            const candidate = workingPlan[j];
-            if (candidate.status === 'running') continue;
-            if (candidate.pkg === 'bulk' && candidate.status !== 'arrived') continue;
-
-            const neededMinutes = getTransitionMinutes(lid, current.order, candidate) + rt(candidate, LINES[lid].speed);
-
-            if (neededMinutes <= gapMinutes) {
-              const nextPlan = [...workingPlan];
-              const [picked] = nextPlan.splice(j, 1);
-              nextPlan.splice(i + 1, 0, picked);
-
-              const valid = planRespectsLoadWindows(lid, nextPlan);
-              if (valid) {
-                const remainder = gapMinutes - neededMinutes;
-                const effPrio = getEffectivePriority(candidate);
-                const volume = ev(candidate);
-                const firstFillUtilization = gapMinutes > 0 ? neededMinutes / gapMinutes : 0;
-                const tooSmallFirstFill = gapMinutes >= 60 && firstFillUtilization < 0.45;
-                const combo = evaluateGapCombination(nextPlan, i + 1, next.order.id, gapMinutes >= 90 ? 3 : 2);
-                const filledMinutes = neededMinutes + combo.fill;
-
-                candidateDebug.push({
-                  orderId: candidate.id,
-                  customer: candidate.customer,
-                  neededMinutes,
-                  filledMinutes,
-                  volume,
-                  remainder,
-                  valid: !tooSmallFirstFill,
-                  reason: tooSmallFirstFill ? 'eerste vulling te klein voor groot gat' : `prio ${effPrio}`
-                });
-
-                const utilization = gapMinutes > 0 ? filledMinutes / gapMinutes : 0;
-                const minUtilization = gapMinutes >= 45 ? 0.6 : 0;
-
-                if (
-                  filledMinutes > fallbackFilledMinutes ||
-                  (filledMinutes === fallbackFilledMinutes && (
-                    volume > fallbackVolume ||
-                    (volume === fallbackVolume && remainder < fallbackRemainder)
-                  ))
-                ) {
-                  fallbackIdx = j;
-                  fallbackFilledMinutes = filledMinutes;
-                  fallbackVolume = volume;
-                  fallbackRemainder = remainder;
-                }
-
-                if (tooSmallFirstFill) {
-                  continue;
-                }
-
-                if (
-                  utilization >= minUtilization && (
-                    utilization > bestUtilization + 0.0001 ||
-                    (Math.abs(utilization - bestUtilization) <= 0.0001 && (
-                      filledMinutes > bestFilledMinutes ||
-                      (filledMinutes === bestFilledMinutes && (
-                        effPrio < bestPrio ||
-                        (effPrio === bestPrio && (
-                          volume > bestVolume ||
-                          (volume === bestVolume && remainder < bestRemainder)
-                        ))
-                      ))
-                    ))
-                  )
-                ) {
-                  bestUtilization = utilization;
-                  bestPrio = effPrio;
-                  bestFilledMinutes = filledMinutes;
-                  bestVolume = volume;
-                  bestRemainder = remainder;
-                  bestIdx = j;
-                }
-              } else {
-                candidateDebug.push({
-                  orderId: candidate.id,
-                  customer: candidate.customer,
-                  neededMinutes,
-                  filledMinutes: neededMinutes,
-                  volume: ev(candidate),
-                  remainder: gapMinutes - neededMinutes,
-                  valid: false,
-                  reason: 'vensterconflict'
-                });
-              }
-            } else {
-              candidateDebug.push({
-                orderId: candidate.id,
-                customer: candidate.customer,
-                neededMinutes,
-                filledMinutes: neededMinutes,
-                volume: ev(candidate),
-                remainder: gapMinutes - neededMinutes,
-                valid: false,
-                reason: 'past niet in gat'
-              });
-            }
-          }
-
-          if (bestIdx < 0 && fallbackIdx >= 0) {
-            bestIdx = fallbackIdx;
-          }
-
-          debugEntries.push({
-            line: lid,
-            afterOrderId: current.order.id,
-            beforeOrderId: next.order.id,
-            gapMinutes,
-            chosenOrderId: bestIdx >= 0 ? workingPlan[bestIdx].id : null,
-            candidates: candidateDebug.slice(0, 5)
-          });
-
-          if (bestIdx >= 0) {
-            const nextPlan = [...workingPlan];
-            const [picked] = nextPlan.splice(bestIdx, 1);
-            nextPlan.splice(i + 1, 0, picked);
-            if (planRespectsLoadWindows(lid, nextPlan)) {
-              workingPlan = nextPlan;
-              changed = true;
-            }
-          }
-        }
-      }
-
-      if (debugEntries.length > 0) {
-        setGapDebug(prev => [...prev.filter(entry => entry.line !== lid), ...debugEntries]);
-      }
-
-      return workingPlan;
-    }, [bunkers, config, getScheduledStartsForLine, planRespectsLoadWindows]);
 
   function getFutureBlockFitBonus(plan: Order[], insertIndex: number, lid: LineId) {
     const candidate = plan[insertIndex];
@@ -2560,6 +1824,22 @@ export default function App() {
     }
     return [1, 2, 3].includes(order.prio) ? order.prio : 2;
   }, [getOrderLoadReferenceTime, planningTime, priorityOnePackages]);
+
+  const {
+    plannedOrderIdsByLine,
+    setPlannedOrderIdsByLine,
+    getScheduledStartsForLine,
+    getTransitionMinutes,
+    fillSimpleSingleGapWithinLine
+  } = usePlanner({
+    bunkers,
+    config,
+    lineTiming,
+    effectiveFirstOrderStart,
+    getOrderLoadReferenceTime,
+    getEffectivePriority,
+    setGapDebug
+  });
 
   const getLoadHoldSequenceRank = useCallback((order: Order): number => {
     const normalizedEta = normalizeEta(order.eta);
