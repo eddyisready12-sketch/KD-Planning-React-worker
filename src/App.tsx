@@ -1467,14 +1467,15 @@ export default function App() {
     localStorage.setItem('kd_storingen', JSON.stringify(storingen));
   }, [storingen]);
   const [currentTime, setCurrentTime] = useState(new Date());
-  const [planningTime, setPlanningTime] = useState(new Date());
-  const planningTimeRef = useRef(planningTime);
+  const planningTimeRef = useRef(new Date());
 
   // Tickers
   useEffect(() => {
     // Keep the header clock independent; these ticks only drive expensive planning/progress calculations.
     const timer = setInterval(() => setCurrentTime(new Date()), 15000);
-    const planningTimer = setInterval(() => setPlanningTime(new Date()), 15000);
+    const planningTimer = setInterval(() => {
+      planningTimeRef.current = new Date();
+    }, 15000);
     const progTimer = setInterval(() => {
       setProgress(p => Math.min(p + 0.06, 99));
     }, 15000);
@@ -1484,10 +1485,6 @@ export default function App() {
       clearInterval(progTimer);
     };
   }, []);
-
-  useEffect(() => {
-    planningTimeRef.current = planningTime;
-  }, [planningTime]);
 
   useEffect(() => {
     localStorage.setItem('kd_line_timing', JSON.stringify(lineTiming));
@@ -2711,7 +2708,7 @@ export default function App() {
           const starts = schedule[lid];
           let cursorEnd: Date | null = null;
           res[lid] = lineOrders.map((order, index) => {
-            const scheduledStart = starts[index] || starts[0] || planningTime;
+            const scheduledStart = starts[index] || starts[0] || planningTimeRef.current;
             const prevOrder = index > 0 ? lineOrders[index - 1] : null;
             const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
             const sw = swMats.length;
@@ -2739,7 +2736,7 @@ export default function App() {
           });
       });
     return res;
-  }, [lineIds, lineOrdersByLine, schedule, bunkers, config, planningTime, getTransitionMinutes]);
+  }, [lineIds, lineOrdersByLine, schedule, bunkers, config, getTransitionMinutes]);
 
   const lineTimelineEntryByOrderId = useMemo(() => {
     const res: Record<LineId, Map<number, ScheduledLineEntry>> = { 1: new Map(), 2: new Map(), 3: new Map() };
@@ -3339,7 +3336,7 @@ export default function App() {
   };
 
   const getPlannerDisplayEntries = useCallback((lineEntries: ScheduledLineEntry[]) => {
-    const nowMinutes = planningTime.getHours() * 60 + planningTime.getMinutes();
+    const nowMinutes = planningTimeRef.current.getHours() * 60 + planningTimeRef.current.getMinutes();
     const prioritizedEntries = lineEntries
       .filter(entry => entry.order.status === 'planned' || entry.order.status === 'arrived')
       .map((entry, index) => ({
@@ -3399,7 +3396,7 @@ export default function App() {
     return sortedEntries.map((entry, index) => {
       const order = entry.order;
       const prevOrder = index > 0 ? orderedOrders[index - 1] : null;
-      const scheduledStart = starts[index] || starts[0] || planningTime;
+      const scheduledStart = starts[index] || starts[0] || planningTimeRef.current;
       const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
       const sw = swMats.length;
       const duration = rt(order, LINES[lid].speed);
@@ -3430,7 +3427,7 @@ export default function App() {
         plannerState: getPlannerOrderState(order, index, sortedEntries as unknown as ScheduledLineEntry[], nowMinutes)
       };
     });
-  }, [planningTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, getOrderLoadReferenceTime]);
+  }, [storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, getOrderLoadReferenceTime]);
 
   const plannerDisplayEntriesByLine = useMemo(() => {
     if (!isPlannerView) {
@@ -3454,18 +3451,18 @@ export default function App() {
   }, [lineIds, plannerDisplayEntriesByLine]);
 
   const plannerWeekDates = useMemo(() => {
-    const anchor = plannerVisibleDates[0] || planningTime;
+    const anchor = plannerVisibleDates[0] || planningTimeRef.current;
     return getPlanningDateRange(anchor, plannerVisibleDates);
-  }, [plannerVisibleDates, planningTime]);
+  }, [plannerVisibleDates]);
 
   useEffect(() => {
     if (!isPlannerView) return;
     const hasSelectedDate = plannerVisibleDates.some(date => formatLocalDate(date) === plannerSelectedDate);
     if (!hasSelectedDate) {
-      const nextVisibleDate = plannerVisibleDates[0] ? formatLocalDate(plannerVisibleDates[0]) : formatLocalDate(planningTime);
+      const nextVisibleDate = plannerVisibleDates[0] ? formatLocalDate(plannerVisibleDates[0]) : formatLocalDate(planningTimeRef.current);
       setPlannerSelectedDate(nextVisibleDate);
     }
-  }, [isPlannerView, plannerVisibleDates, plannerSelectedDate, planningTime]);
+  }, [isPlannerView, plannerVisibleDates, plannerSelectedDate]);
 
   const filteredPlannerDisplayEntriesByLine = useMemo(() => {
     if (!isPlannerView) {
@@ -3635,7 +3632,7 @@ export default function App() {
   const operatorDisplayEntries = useMemo(() => {
       if (!isOperatorView) return [];
 
-      const nowMinutes = planningTime.getHours() * 60 + planningTime.getMinutes();
+      const nowMinutes = planningTimeRef.current.getHours() * 60 + planningTimeRef.current.getMinutes();
   
       const prioritizedEntries = plannedEntries
         .map((entry, index) => ({
@@ -3699,7 +3696,7 @@ export default function App() {
         const firstStartTime = starts[0];
         const firstTransitionMinutes = getTransitionMinutes(lid, firstPrevOrder, firstOrder);
         const firstBaseProdStart = new Date(firstStartTime.getTime() + firstTransitionMinutes * 60000);
-        const nowTime = planningTime.getTime();
+        const nowTime = planningTimeRef.current.getTime();
         if (firstBaseProdStart.getTime() < nowTime) {
           cursorEnd = new Date(nowTime - firstTransitionMinutes * 60000);
         }
@@ -3707,7 +3704,7 @@ export default function App() {
       return sortedEntries.map((entry, index) => {
         const order = entry.order;
         const prevOrder = index > 0 ? orderedOrders[index - 1] : null;
-        const scheduledStart = starts[index] || starts[0] || planningTime;
+        const scheduledStart = starts[index] || starts[0] || planningTimeRef.current;
         const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
         const sw = swMats.length;
         const duration = rt(order, LINES[lid].speed);
@@ -3736,7 +3733,7 @@ export default function App() {
           operatorState.key === 'direct' &&
           normalizePkg(order.pkg) === 'bulk' &&
           loadDateTime &&
-          planningTime.getTime() < loadDateTime.getTime()
+          planningTimeRef.current.getTime() < loadDateTime.getTime()
         ) {
           operatorState = {
             label: 'Wachten',
@@ -3757,7 +3754,7 @@ export default function App() {
           operatorState
         };
       });
-    }, [isOperatorView, plannedEntries, planningTime, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime, manualOperatorOrderLines]);
+    }, [isOperatorView, plannedEntries, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime, manualOperatorOrderLines]);
 
   const nextOperatorOrder = useMemo(
     () => operatorDisplayEntries[0]?.order || null,
