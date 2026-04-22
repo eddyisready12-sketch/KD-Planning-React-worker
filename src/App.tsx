@@ -1468,6 +1468,7 @@ export default function App() {
   }, [storingen]);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [planningTime, setPlanningTime] = useState(new Date());
+  const planningTimeRef = useRef(planningTime);
 
   // Tickers
   useEffect(() => {
@@ -1483,6 +1484,10 @@ export default function App() {
       clearInterval(progTimer);
     };
   }, []);
+
+  useEffect(() => {
+    planningTimeRef.current = planningTime;
+  }, [planningTime]);
 
   useEffect(() => {
     localStorage.setItem('kd_line_timing', JSON.stringify(lineTiming));
@@ -1504,7 +1509,8 @@ export default function App() {
   const isBagPkg = (order: Order | null) => order?.pkg?.toLowerCase() === 'bag';
 
   const getEffectivePriority = useCallback((order: Order): 1 | 2 | 3 => {
-    const nowMinutes = planningTime.getHours() * 60 + planningTime.getMinutes();
+    const currentPlanningTime = planningTimeRef.current;
+    const nowMinutes = currentPlanningTime.getHours() * 60 + currentPlanningTime.getMinutes();
     const nowOperationalMinutes = nowMinutes - (5 * 60);
     const pkg = normalizePkg(order.pkg);
     if (priorityOnePackages.has(pkg)) return 1;
@@ -1516,7 +1522,7 @@ export default function App() {
       return order.status === 'arrived' && loadWindowOpen ? 1 : 2;
     }
     return [1, 2, 3].includes(order.prio) ? order.prio : 2;
-  }, [getOrderLoadReferenceTime, planningTime, priorityOnePackages]);
+  }, [getOrderLoadReferenceTime, priorityOnePackages]);
 
   const {
     plannedOrderIdsByLine,
@@ -2461,10 +2467,25 @@ export default function App() {
     return plan;
   }, [bunkers, lineTiming, plannerSort, getOrderContentMetrics, getContentClusterBonus, getWindowClusterBonus, getRitWindowClusterBonus, getTrailingBlockMaterialBias, getTrailingBlockComboBias, config, getTransitionMinutes, isBagOrder, isBaleOrder, getLinePlanCursor]);
 
+  const planningComputationInput = useMemo(() => ({
+    orders,
+    bunkers,
+    plannedOrderIdsByLine,
+    config,
+    plannerSort
+  }), [orders, bunkers, plannedOrderIdsByLine, config, plannerSort]);
+
+  const deferredPlanningComputationInput = useDeferredValue(planningComputationInput);
+
   const activeOrders = useMemo(() => {
-    const base = orders.filter(o => o.status !== 'completed');
+    const {
+      orders: planningOrders,
+      bunkers: planningBunkers,
+      plannerSort: planningSort
+    } = deferredPlanningComputationInput;
+    const base = planningOrders.filter(o => o.status !== 'completed');
     
-    if (plannerSort === 'efficiency') {
+    if (planningSort === 'efficiency') {
       const sorted: Order[] = [];
       const lineIds: LineId[] = [1, 2, 3];
       
@@ -2492,7 +2513,7 @@ export default function App() {
           let minSw = 999;
           
           for (let i = 0; i < remaining.length; i++) {
-            const sw = swCount(current, remaining[i], bunkers[lid]);
+            const sw = swCount(current, remaining[i], planningBunkers[lid]);
             if (sw < minSw) {
               minSw = sw;
               bestIdx = i;
@@ -2516,7 +2537,7 @@ export default function App() {
     }
 
     return base.sort((a, b) => {
-      if (plannerSort === 'eta') {
+      if (planningSort === 'eta') {
         const etaA = a.pkg === 'bulk' && a.status !== 'arrived'
           ? 9999
           : (etaToMins(normalizeEta(a.eta)) || 9999);
@@ -2525,8 +2546,8 @@ export default function App() {
           : (etaToMins(normalizeEta(b.eta)) || 9999);
         return etaA - etaB;
       }
-      if (plannerSort === 'prio') return getEffectivePriority(a) - getEffectivePriority(b);
-      if (plannerSort === 'customer') return a.customer.localeCompare(b.customer);
+      if (planningSort === 'prio') return getEffectivePriority(a) - getEffectivePriority(b);
+      if (planningSort === 'customer') return a.customer.localeCompare(b.customer);
       
       const effA = getEffectivePriority(a);
       const effB = getEffectivePriority(b);
@@ -2535,7 +2556,7 @@ export default function App() {
       const etaB = etaToMins(normalizeEta(b.eta)) || 9999;
       return etaA - etaB;
     });
-  }, [orders, plannerSort, bunkers]);
+  }, [deferredPlanningComputationInput, getEffectivePriority]);
   const completedOrderCount = useMemo(
     () => orders.reduce((count, order) => count + (order.status === 'completed' ? 1 : 0), 0),
     [orders]
@@ -2652,10 +2673,11 @@ export default function App() {
   }, [activeOrders, buildLinePlan, fillQuickGapWithinLine, getScheduledStartsForLine, orders, planRespectsLoadWindows, plannerRecalcLock]);
 
   const lineOrdersByLine = useMemo(() => {
+    const { plannedOrderIdsByLine: deferredPlannedOrderIdsByLine } = deferredPlanningComputationInput;
     const res: Record<LineId, Order[]> = { 1: [], 2: [], 3: [] };
     lineIds.forEach(lid => {
       const source = activeOrders.filter(o => o.line === lid);
-      const plannedIds = plannedOrderIdsByLine?.[lid];
+      const plannedIds = deferredPlannedOrderIdsByLine?.[lid];
       if (!plannedIds || plannedIds.length === 0) {
         res[lid] = source;
         return;
@@ -2666,7 +2688,7 @@ export default function App() {
       res[lid] = [...ordered, ...leftovers];
     });
     return res;
-  }, [activeOrders, plannedOrderIdsByLine]);
+  }, [activeOrders, deferredPlanningComputationInput]);
 
   const plannedActiveOrders = useMemo(
     () => lineIds.flatMap(lid => lineOrdersByLine[lid]),
