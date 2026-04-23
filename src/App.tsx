@@ -2692,20 +2692,29 @@ export default function App() {
   }, [activeOrders, deferredPlanningComputationInput]);
 
   const plannedActiveOrders = useMemo(
-    () => lineIds.flatMap(lid => lineOrdersByLine[lid]),
-    [lineOrdersByLine]
+    () => {
+      if (!isPlannerView) return [];
+      return lineIds.flatMap(lid => lineOrdersByLine[lid]);
+    },
+    [isPlannerView, lineIds, lineOrdersByLine]
   );
 
   const schedule = useMemo(() => {
+    if (!isOperatorView && !isPlannerView) {
+      return { 1: [], 2: [], 3: [] } as Record<LineId, Date[]>;
+    }
     const res: Record<LineId, Date[]> = { 1: [], 2: [], 3: [] };
     lineIds.forEach(lid => {
       const lineOrders = lineOrdersByLine[lid];
       res[lid] = getScheduledStartsForLine(lineOrders, lid);
     });
     return res;
-  }, [lineIds, lineOrdersByLine, config, bunkers, lineTiming]);
+  }, [isOperatorView, isPlannerView, lineIds, lineOrdersByLine, config, bunkers, lineTiming]);
 
   const lineTimelineByLine = useMemo(() => {
+    if (!isOperatorView && !isPlannerView) {
+      return { 1: [], 2: [], 3: [] } as Record<LineId, ScheduledLineEntry[]>;
+    }
     const res: Record<LineId, ScheduledLineEntry[]> = { 1: [], 2: [], 3: [] };
       lineIds.forEach(lid => {
           const lineOrders = lineOrdersByLine[lid];
@@ -2740,7 +2749,7 @@ export default function App() {
           });
       });
     return res;
-  }, [lineIds, lineOrdersByLine, schedule, bunkers, config, getTransitionMinutes]);
+  }, [isOperatorView, isPlannerView, lineIds, lineOrdersByLine, schedule, bunkers, config, getTransitionMinutes]);
 
   const lineTimelineEntryByOrderId = useMemo(() => {
     const res: Record<LineId, Map<number, ScheduledLineEntry>> = { 1: new Map(), 2: new Map(), 3: new Map() };
@@ -2852,8 +2861,11 @@ export default function App() {
   }, [bunkers, displayedCurrentOrder, selectedLine]);
 
   const plannedEntries = useMemo(
-    () => selectedLineTimeline.filter(entry => entry.order.status === 'planned' || entry.order.status === 'arrived'),
-    [selectedLineTimeline]
+    () => {
+      if (!isOperatorView) return [];
+      return selectedLineTimeline.filter(entry => entry.order.status === 'planned' || entry.order.status === 'arrived');
+    },
+    [isOperatorView, selectedLineTimeline]
   );
 
   const reorderOperatorLineOrders = useCallback((lid: LineId, draggedId: number, targetId: number) => {
@@ -4164,6 +4176,16 @@ export default function App() {
   }, [visiblePlannerDrivers, selectedDriverName]);
 
   const lineDebug = useMemo(() => {
+    if (!isOperatorView) {
+      return {
+        total: 0,
+        active: 0,
+        ml1: 0,
+        ml2: 0,
+        ml3: 0,
+        countsByLine: { 1: 0, 2: 0, 3: 0 },
+      };
+    }
     const countsByLine = {
       1: activeOrders.filter(o => o.line === 1).length,
       2: activeOrders.filter(o => o.line === 2).length,
@@ -4178,7 +4200,7 @@ export default function App() {
       ml3: countsByLine[3],
       countsByLine,
     };
-  }, [orders, activeOrders]);
+  }, [isOperatorView, orders, activeOrders]);
 
   const handleStartOrder = async (id: number) => {
     const target = orders.find(o => o.id === id);
