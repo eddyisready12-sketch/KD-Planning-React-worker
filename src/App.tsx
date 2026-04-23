@@ -4607,8 +4607,10 @@ export default function App() {
                 dayRosterTimeSlots={dayRosterTimeSlots}
                 dayRosterUnassignedEntries={dayRosterUnassignedEntries}
                 draggedDayRosterOrderId={draggedDayRosterOrderId}
+                draggedDriverName={draggedDriverName}
                 driverConflictOrderIds={driverConflictOrderIds}
                 driverSyncDebug={driverSyncDebug}
+                emptyDriverForm={EMPTY_DRIVER_FORM}
                 filteredPlannerDisplayEntriesByLine={filteredPlannerDisplayEntriesByLine}
                 formatLocalDate={formatLocalDate}
                 formatPlannerDateChip={formatPlannerDateChip}
@@ -4618,6 +4620,7 @@ export default function App() {
                 getChauffeurOrderReason={getChauffeurOrderReason}
                 getDriverOccupancyWindow={getDriverOccupancyWindow}
                 getEffectivePriority={getEffectivePriority}
+                getHeldLoadDateTime={getHeldLoadDateTime}
                 getIssueAffectedOrderCount={getIssueAffectedOrderCount}
                 getIssueAffectedOrdersPreview={getIssueAffectedOrdersPreview}
                 getIssueAffectedVolumeLabel={getIssueAffectedVolumeLabel}
@@ -4675,6 +4678,7 @@ export default function App() {
                 setDraggedDriverName={setDraggedDriverName}
                 setNewDriverForm={setNewDriverForm}
                 setPlannerSelectedDate={setPlannerSelectedDate}
+                setPlannerSearch={setPlannerSearch}
                 setPlannerSort={setPlannerSort}
                 setSelectedDriverName={setSelectedDriverName}
                 setSelectedOrderForDetail={setSelectedOrderForDetail}

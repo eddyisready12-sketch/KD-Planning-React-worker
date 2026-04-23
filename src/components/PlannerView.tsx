@@ -2,7 +2,10 @@ import React from 'react';
 import { motion } from 'motion/react';
 import { ClipboardList, Check, Package, Pencil, RefreshCw, Truck as TruckIcon, X } from 'lucide-react';
 import { LINES } from '../constants';
+import { LineId, Order } from '../types';
 import { ev, fmt, normalizePkg } from '../utils';
+
+type ScheduledLineEntry = any;
 
 export const PlannerView = React.memo(function PlannerView(props: any) {
   const {
@@ -30,8 +33,10 @@ export const PlannerView = React.memo(function PlannerView(props: any) {
     dayRosterTimeSlots,
     dayRosterUnassignedEntries,
     draggedDayRosterOrderId,
+    draggedDriverName,
     driverConflictOrderIds,
     driverSyncDebug,
+    emptyDriverForm,
     filteredPlannerDisplayEntriesByLine,
     formatLocalDate,
     formatPlannerDateChip,
@@ -41,6 +46,7 @@ export const PlannerView = React.memo(function PlannerView(props: any) {
     getChauffeurOrderReason,
     getDriverOccupancyWindow,
     getEffectivePriority,
+    getHeldLoadDateTime,
     getIssueAffectedOrderCount,
     getIssueAffectedOrdersPreview,
     getIssueAffectedVolumeLabel,
@@ -98,6 +104,7 @@ export const PlannerView = React.memo(function PlannerView(props: any) {
     setDraggedDriverName,
     setNewDriverForm,
     setPlannerSelectedDate,
+    setPlannerSearch,
     setPlannerSort,
     setSelectedDriverName,
     setSelectedOrderForDetail,
@@ -561,7 +568,7 @@ export const PlannerView = React.memo(function PlannerView(props: any) {
                             const runningProgress = runningEntry && runningStart
                               ? Math.max(0, Math.min(99, ((currentTime.getTime() - runningStart.getTime()) / (runningEntry.duration * 60000)) * 100))
                               : 0;
-                            const lineTimelineIndexByOrderId = new Map(lineTimelineByLine[lid].map((entry, index) => [entry.order.id, index]));
+                            const lineTimelineIndexByOrderId = new Map<number, number>(lineTimelineByLine[lid].map((entry, index) => [entry.order.id, index]));
                             const runningIndex = runningEntry ? (lineTimelineIndexByOrderId.get(runningEntry.order.id) ?? -1) : -1;
                             const plannerDisplayTimeline = plannerDisplayTimelineCandidates.filter(entry => {
                               if (entry.order.status === 'running') return false;
@@ -1300,7 +1307,7 @@ export const PlannerView = React.memo(function PlannerView(props: any) {
                                       type="button"
                                       className="flex-1 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-600 transition-colors hover:bg-gray-50"
                                       onClick={() => {
-                                        setNewDriverForm(EMPTY_DRIVER_FORM);
+                                        setNewDriverForm(emptyDriverForm);
                                         setShowDriverForm(false);
                                       }}
                                       disabled={isSavingDriver}
