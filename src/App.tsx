@@ -3670,6 +3670,26 @@ export default function App() {
         if (key === 'prep') return 1;
         return 2;
       };
+      const lineBunkerScope = bunkers[lid] || [];
+      const switchCountCache = new Map<string, number>();
+      const transitionMinutesCache = new Map<string, number>();
+      const getOrderPairCacheKey = (prevOrder: Order | null, nextOrder: Order) => `${prevOrder?.id ?? 'null'}|${nextOrder.id}`;
+      const getCachedSwitchCount = (prevOrder: Order | null, nextOrder: Order) => {
+        const cacheKey = getOrderPairCacheKey(prevOrder, nextOrder);
+        const cached = switchCountCache.get(cacheKey);
+        if (cached !== undefined) return cached;
+        const computed = getSwitchMaterials(prevOrder, nextOrder, lineBunkerScope).length;
+        switchCountCache.set(cacheKey, computed);
+        return computed;
+      };
+      const getCachedTransitionMinutes = (prevOrder: Order | null, nextOrder: Order) => {
+        const cacheKey = getOrderPairCacheKey(prevOrder, nextOrder);
+        const cached = transitionMinutesCache.get(cacheKey);
+        if (cached !== undefined) return cached;
+        const computed = getTransitionMinutes(lid, prevOrder, nextOrder);
+        transitionMinutesCache.set(cacheKey, computed);
+        return computed;
+      };
       const sortByBestNext = <T extends typeof prioritizedEntries[number]>(
         entries: T[],
         initialReferenceOrder: Order | null
@@ -3683,12 +3703,12 @@ export default function App() {
             const rankDiff = stateRank(a.operatorState.key) - stateRank(b.operatorState.key);
             if (rankDiff !== 0) return rankDiff;
 
-            const aSwitches = a.operatorState.key === 'direct' ? 0 : getSwitchMaterials(referenceOrder, a.order, bunkers[lid] || []).length;
-            const bSwitches = b.operatorState.key === 'direct' ? 0 : getSwitchMaterials(referenceOrder, b.order, bunkers[lid] || []).length;
+            const aSwitches = a.operatorState.key === 'direct' ? 0 : getCachedSwitchCount(referenceOrder, a.order);
+            const bSwitches = b.operatorState.key === 'direct' ? 0 : getCachedSwitchCount(referenceOrder, b.order);
             if (aSwitches !== bSwitches) return aSwitches - bSwitches;
 
-            const aTransition = a.operatorState.key === 'direct' ? 0 : getTransitionMinutes(lid, referenceOrder, a.order);
-            const bTransition = b.operatorState.key === 'direct' ? 0 : getTransitionMinutes(lid, referenceOrder, b.order);
+            const aTransition = a.operatorState.key === 'direct' ? 0 : getCachedTransitionMinutes(referenceOrder, a.order);
+            const bTransition = b.operatorState.key === 'direct' ? 0 : getCachedTransitionMinutes(referenceOrder, b.order);
             if (aTransition !== bTransition) return aTransition - bTransition;
 
             const aEta = etaToMins(getOrderLoadReferenceTime(a.order)) ?? Number.POSITIVE_INFINITY;
