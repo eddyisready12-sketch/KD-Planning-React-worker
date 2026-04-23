@@ -3659,6 +3659,7 @@ export default function App() {
   const visiblePlannerTriggers = activePlannerTriggerRows;
 
   const operatorDisplayEntries = useMemo(() => {
+        console.trace('operatorDisplayEntries triggered');
         if (!isOperatorView) return [];
 
         const nowMinutes = planningTimeRef.current.getHours() * 60 + planningTimeRef.current.getMinutes();
