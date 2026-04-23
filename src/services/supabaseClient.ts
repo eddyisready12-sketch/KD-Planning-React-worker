@@ -7,8 +7,10 @@ export const supabase =
   SUPABASE_URL && SUPABASE_ANON_KEY
     ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
         auth: {
-          persistSession: true,
-          autoRefreshToken: false
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false,
+          storage: undefined
         }
       })
     : null;
