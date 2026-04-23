@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { unstable_batchedUpdates } from 'react-dom';
 import { 
   LineId, Order, Bunker, Melding, Storing, AppConfig, Truck, PlannerTrigger, OrderComponent, BagVolumeRule
 } from './types';
@@ -788,12 +789,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    console.time('effect:setRuntimeMaterialOverrides');
-    try {
-      setRuntimeMaterialOverrides(materialOverridePairs);
-    } finally {
-      console.timeEnd('effect:setRuntimeMaterialOverrides');
-    }
+    setRuntimeMaterialOverrides(materialOverridePairs);
   }, [materialOverridePairs]);
 
   const getOrderLoadReferenceTime = useCallback(
@@ -975,22 +971,24 @@ export default function App() {
       try {
         const sharedOrders = await fetchOrdersFromSupabase();
         if (sharedOrders.length > 0) {
-          setOrders(prev => {
-            const prevByKey = new Map(prev.map(o => [orderKey(o), o]));
-            return sharedOrders.map(order => {
-              const existing = prevByKey.get(orderKey(order));
-              if (!existing) return order;
-              const keepLocalRunning = existing.status === 'running' && !order.startedAt;
-              const keepLocalArrived = existing.status === 'arrived' && !order.arrivedTime;
-              return {
-                ...order,
-                status: keepLocalRunning ? existing.status : order.status,
-                arrived: keepLocalRunning ? existing.arrived : keepLocalArrived ? existing.arrived : order.arrived,
-                arrivedTime: keepLocalRunning ? (existing.arrivedTime || order.arrivedTime) : keepLocalArrived ? (existing.arrivedTime || order.arrivedTime) : order.arrivedTime,
-                startedAt: keepLocalRunning ? (existing.startedAt || order.startedAt) : order.startedAt,
-                holdLoadTime: keepLocalRunning || keepLocalArrived ? !!existing.holdLoadTime : !!order.holdLoadTime,
-                eta: keepLocalRunning ? (existing.eta || order.eta) : order.eta
-              };
+          unstable_batchedUpdates(() => {
+            setOrders(prev => {
+              const prevByKey = new Map(prev.map(o => [orderKey(o), o]));
+              return sharedOrders.map(order => {
+                const existing = prevByKey.get(orderKey(order));
+                if (!existing) return order;
+                const keepLocalRunning = existing.status === 'running' && !order.startedAt;
+                const keepLocalArrived = existing.status === 'arrived' && !order.arrivedTime;
+                return {
+                  ...order,
+                  status: keepLocalRunning ? existing.status : order.status,
+                  arrived: keepLocalRunning ? existing.arrived : keepLocalArrived ? existing.arrived : order.arrived,
+                  arrivedTime: keepLocalRunning ? (existing.arrivedTime || order.arrivedTime) : keepLocalArrived ? (existing.arrivedTime || order.arrivedTime) : order.arrivedTime,
+                  startedAt: keepLocalRunning ? (existing.startedAt || order.startedAt) : order.startedAt,
+                  holdLoadTime: keepLocalRunning || keepLocalArrived ? !!existing.holdLoadTime : !!order.holdLoadTime,
+                  eta: keepLocalRunning ? (existing.eta || order.eta) : order.eta
+                };
+              });
             });
           });
         }
@@ -1016,28 +1014,30 @@ export default function App() {
             const updatedOrder = mapRealtimeOrderRow(payload.new as Record<string, unknown>);
             if (!updatedOrder) return;
 
-            setOrders(prev => {
-              const next = prev.slice();
-              const nextKey = orderKey(updatedOrder);
-              const existingIndex = next.findIndex(order => orderKey(order) === nextKey);
-              if (existingIndex === -1) {
-                next.push(updatedOrder);
-                return next;
-              }
+            unstable_batchedUpdates(() => {
+              setOrders(prev => {
+                const next = prev.slice();
+                const nextKey = orderKey(updatedOrder);
+                const existingIndex = next.findIndex(order => orderKey(order) === nextKey);
+                if (existingIndex === -1) {
+                  next.push(updatedOrder);
+                  return next;
+                }
 
-              const existing = next[existingIndex];
-              const keepLocalRunning = existing.status === 'running' && !updatedOrder.startedAt;
-              const keepLocalArrived = existing.status === 'arrived' && !updatedOrder.arrivedTime;
-              next[existingIndex] = {
-                ...updatedOrder,
-                status: keepLocalRunning ? existing.status : updatedOrder.status,
-                arrived: keepLocalRunning ? existing.arrived : keepLocalArrived ? existing.arrived : updatedOrder.arrived,
-                arrivedTime: keepLocalRunning ? (existing.arrivedTime || updatedOrder.arrivedTime) : keepLocalArrived ? (existing.arrivedTime || updatedOrder.arrivedTime) : updatedOrder.arrivedTime,
-                startedAt: keepLocalRunning ? (existing.startedAt || updatedOrder.startedAt) : updatedOrder.startedAt,
-                holdLoadTime: keepLocalRunning || keepLocalArrived ? !!existing.holdLoadTime : !!updatedOrder.holdLoadTime,
-                eta: keepLocalRunning ? (existing.eta || updatedOrder.eta) : updatedOrder.eta
-              };
-              return next;
+                const existing = next[existingIndex];
+                const keepLocalRunning = existing.status === 'running' && !updatedOrder.startedAt;
+                const keepLocalArrived = existing.status === 'arrived' && !updatedOrder.arrivedTime;
+                next[existingIndex] = {
+                  ...updatedOrder,
+                  status: keepLocalRunning ? existing.status : updatedOrder.status,
+                  arrived: keepLocalRunning ? existing.arrived : keepLocalArrived ? existing.arrived : updatedOrder.arrived,
+                  arrivedTime: keepLocalRunning ? (existing.arrivedTime || updatedOrder.arrivedTime) : keepLocalArrived ? (existing.arrivedTime || updatedOrder.arrivedTime) : updatedOrder.arrivedTime,
+                  startedAt: keepLocalRunning ? (existing.startedAt || updatedOrder.startedAt) : updatedOrder.startedAt,
+                  holdLoadTime: keepLocalRunning || keepLocalArrived ? !!existing.holdLoadTime : !!updatedOrder.holdLoadTime,
+                  eta: keepLocalRunning ? (existing.eta || updatedOrder.eta) : updatedOrder.eta
+                };
+                return next;
+              });
             });
             return;
           }
@@ -1053,7 +1053,9 @@ export default function App() {
               line: ([1, 2, 3].includes(deletedLine) ? deletedLine : 1) as LineId,
               productionOrder: String(deletedOrder.production_order || '').trim() || undefined
             });
-            setOrders(prev => prev.filter(order => orderKey(order) !== deletedKey));
+            unstable_batchedUpdates(() => {
+              setOrders(prev => prev.filter(order => orderKey(order) !== deletedKey));
+            });
           }
         }
       )
@@ -2486,8 +2488,6 @@ export default function App() {
   const deferredPlanningComputationInput = useDeferredValue(planningComputationInput);
 
   const activeOrders = useMemo(() => {
-    console.time('activeOrders');
-    try {
       const {
         orders: planningOrders,
         bunkers: planningBunkers,
@@ -2566,9 +2566,6 @@ export default function App() {
         const etaB = etaToMins(normalizeEta(b.eta)) || 9999;
         return etaA - etaB;
       });
-    } finally {
-      console.timeEnd('activeOrders');
-    }
   }, [deferredPlanningComputationInput, getEffectivePriority]);
   const completedOrderCount = useMemo(
     () => orders.reduce((count, order) => count + (order.status === 'completed' ? 1 : 0), 0),
@@ -2580,8 +2577,6 @@ export default function App() {
   }, [isCompletedTabVisible, orders]);
 
   useEffect(() => {
-    console.time('effect:setPlannedOrderIdsByLine');
-    try {
       setPlannedOrderIdsByLine(prev => {
         if (!prev) return prev;
         const next: Record<LineId, number[]> = { 1: [], 2: [], 3: [] };
@@ -2602,9 +2597,6 @@ export default function App() {
 
         return changed ? next : prev;
       });
-    } finally {
-      console.timeEnd('effect:setPlannedOrderIdsByLine');
-    }
   }, [activeOrders]);
 
   const lineIds: LineId[] = [1, 2, 3];
@@ -2721,65 +2713,55 @@ export default function App() {
   );
 
   const schedule = useMemo(() => {
-    console.time('schedule');
-    try {
-      if (!isOperatorView && !isPlannerView) {
-        return { 1: [], 2: [], 3: [] } as Record<LineId, Date[]>;
-      }
-      const res: Record<LineId, Date[]> = { 1: [], 2: [], 3: [] };
-      lineIds.forEach(lid => {
-        const lineOrders = lineOrdersByLine[lid];
-        res[lid] = getScheduledStartsForLine(lineOrders, lid);
-      });
-      return res;
-    } finally {
-      console.timeEnd('schedule');
+    if (!isOperatorView && !isPlannerView) {
+      return { 1: [], 2: [], 3: [] } as Record<LineId, Date[]>;
     }
+    const res: Record<LineId, Date[]> = { 1: [], 2: [], 3: [] };
+    lineIds.forEach(lid => {
+      const lineOrders = lineOrdersByLine[lid];
+      res[lid] = getScheduledStartsForLine(lineOrders, lid);
+    });
+    return res;
   }, [isOperatorView, isPlannerView, lineIds, lineOrdersByLine, config, bunkers, lineTiming]);
 
   const lineTimelineByLine = useMemo(() => {
-    console.time('lineTimelineByLine');
-    try {
-      if (!isOperatorView && !isPlannerView) {
-        return { 1: [], 2: [], 3: [] } as Record<LineId, ScheduledLineEntry[]>;
-      }
-      const res: Record<LineId, ScheduledLineEntry[]> = { 1: [], 2: [], 3: [] };
-        lineIds.forEach(lid => {
-            const lineOrders = lineOrdersByLine[lid];
-            const starts = schedule[lid];
-            let cursorEnd: Date | null = null;
-            res[lid] = lineOrders.map((order, index) => {
-              const scheduledStart = starts[index] || starts[0] || planningTimeRef.current;
-              const prevOrder = index > 0 ? lineOrders[index - 1] : null;
-              const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
-              const sw = swMats.length;
-              const duration = rt(order, LINES[lid].speed);
-              const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
-              let startTime = cursorEnd ? new Date(cursorEnd) : scheduledStart;
-              let prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
-
-              const runningStart = getRunningOrderStart(order);
-              if (runningStart) {
-                prodStart = runningStart;
-                startTime = new Date(prodStart.getTime() - transitionMinutes * 60000);
-              }
-
-              const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
-              if (heldLoadDateTime && prodStart.getTime() < heldLoadDateTime.getTime()) {
-                const shiftMs = heldLoadDateTime.getTime() - prodStart.getTime();
-                startTime = new Date(startTime.getTime() + shiftMs);
-                prodStart = new Date(prodStart.getTime() + shiftMs);
-              }
-
-              const endTime = new Date(prodStart.getTime() + duration * 60000);
-              cursorEnd = endTime;
-              return { order, startTime, prodStart, endTime, swMats, sw, duration };
-            });
-        });
-      return res;
-    } finally {
-      console.timeEnd('lineTimelineByLine');
+    if (!isOperatorView && !isPlannerView) {
+      return { 1: [], 2: [], 3: [] } as Record<LineId, ScheduledLineEntry[]>;
     }
+    const res: Record<LineId, ScheduledLineEntry[]> = { 1: [], 2: [], 3: [] };
+      lineIds.forEach(lid => {
+          const lineOrders = lineOrdersByLine[lid];
+          const starts = schedule[lid];
+          let cursorEnd: Date | null = null;
+          res[lid] = lineOrders.map((order, index) => {
+            const scheduledStart = starts[index] || starts[0] || planningTimeRef.current;
+            const prevOrder = index > 0 ? lineOrders[index - 1] : null;
+            const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
+            const sw = swMats.length;
+            const duration = rt(order, LINES[lid].speed);
+            const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
+            let startTime = cursorEnd ? new Date(cursorEnd) : scheduledStart;
+            let prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
+
+            const runningStart = getRunningOrderStart(order);
+            if (runningStart) {
+              prodStart = runningStart;
+              startTime = new Date(prodStart.getTime() - transitionMinutes * 60000);
+            }
+
+            const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
+            if (heldLoadDateTime && prodStart.getTime() < heldLoadDateTime.getTime()) {
+              const shiftMs = heldLoadDateTime.getTime() - prodStart.getTime();
+              startTime = new Date(startTime.getTime() + shiftMs);
+              prodStart = new Date(prodStart.getTime() + shiftMs);
+            }
+
+            const endTime = new Date(prodStart.getTime() + duration * 60000);
+            cursorEnd = endTime;
+            return { order, startTime, prodStart, endTime, swMats, sw, duration };
+          });
+      });
+    return res;
   }, [isOperatorView, isPlannerView, lineIds, lineOrdersByLine, schedule, bunkers, config, getTransitionMinutes]);
 
   const lineTimelineEntryByOrderId = useMemo(() => {
@@ -3503,16 +3485,11 @@ export default function App() {
   }, [plannerVisibleDates]);
 
   useEffect(() => {
-    console.time('effect:setPlannerSelectedDate');
-    try {
-      if (!isPlannerView) return;
-      const hasSelectedDate = plannerVisibleDates.some(date => formatLocalDate(date) === plannerSelectedDate);
-      if (!hasSelectedDate) {
-        const nextVisibleDate = plannerVisibleDates[0] ? formatLocalDate(plannerVisibleDates[0]) : formatLocalDate(planningTimeRef.current);
-        setPlannerSelectedDate(nextVisibleDate);
-      }
-    } finally {
-      console.timeEnd('effect:setPlannerSelectedDate');
+    if (!isPlannerView) return;
+    const hasSelectedDate = plannerVisibleDates.some(date => formatLocalDate(date) === plannerSelectedDate);
+    if (!hasSelectedDate) {
+      const nextVisibleDate = plannerVisibleDates[0] ? formatLocalDate(plannerVisibleDates[0]) : formatLocalDate(planningTimeRef.current);
+      setPlannerSelectedDate(nextVisibleDate);
     }
   }, [isPlannerView, plannerVisibleDates, plannerSelectedDate]);
 
@@ -3682,8 +3659,6 @@ export default function App() {
   const visiblePlannerTriggers = activePlannerTriggerRows;
 
   const operatorDisplayEntries = useMemo(() => {
-      console.time('operatorDisplayEntries');
-      try {
         if (!isOperatorView) return [];
 
         const nowMinutes = planningTimeRef.current.getHours() * 60 + planningTimeRef.current.getMinutes();
@@ -3828,9 +3803,6 @@ export default function App() {
             operatorState
           };
         });
-      } finally {
-        console.timeEnd('operatorDisplayEntries');
-      }
   }, [isOperatorView, plannedEntries, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime, manualOperatorOrderLines]);
 
   const nextOperatorOrder = useMemo(
@@ -4228,17 +4200,12 @@ export default function App() {
   };
 
   useEffect(() => {
-    console.time('effect:setSelectedDriverName');
-    try {
-      if (!visiblePlannerDrivers.length) {
-        setSelectedDriverName('');
-        return;
-      }
-      if (selectedDriverName && !visiblePlannerDrivers.some(driver => driver.name === selectedDriverName)) {
-        setSelectedDriverName(visiblePlannerDrivers[0].name);
-      }
-    } finally {
-      console.timeEnd('effect:setSelectedDriverName');
+    if (!visiblePlannerDrivers.length) {
+      setSelectedDriverName('');
+      return;
+    }
+    if (selectedDriverName && !visiblePlannerDrivers.some(driver => driver.name === selectedDriverName)) {
+      setSelectedDriverName(visiblePlannerDrivers[0].name);
     }
   }, [visiblePlannerDrivers, selectedDriverName]);
 
