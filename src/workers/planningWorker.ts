@@ -204,6 +204,11 @@ function fillSimpleSingleGapWithinLineInWorker(payload: FillSimpleGapWorkerPaylo
   let passes = 0;
   const maxPasses = 3;
   const debugEntries: GapDebugEntry[] = [];
+  const isUnconfirmedPlannedBulkCandidate = (order: Order) =>
+    order.pkg === 'bulk' &&
+    order.status === 'planned' &&
+    !order.arrivedTime &&
+    !order.holdLoadTime;
 
   while (changed && passes < maxPasses) {
     changed = false;
@@ -282,6 +287,7 @@ function fillSimpleSingleGapWithinLineInWorker(payload: FillSimpleGapWorkerPaylo
           const candidate = planState[idx];
           if (candidate.id === targetOrderId) continue;
           if (candidate.status === 'running') continue;
+          if (isUnconfirmedPlannedBulkCandidate(candidate)) continue;
           candidateIndexes.push(idx);
         }
 
@@ -336,6 +342,7 @@ function fillSimpleSingleGapWithinLineInWorker(payload: FillSimpleGapWorkerPaylo
       for (let j = i + 2; j < candidateLimit; j++) {
         const candidate = workingPlan[j];
         if (candidate.status === 'running') continue;
+        if (isUnconfirmedPlannedBulkCandidate(candidate)) continue;
         if (candidate.pkg === 'bulk' && candidate.status !== 'arrived') continue;
 
         const neededMinutes = getTransitionMinutes(lid, current.order, candidate) + rt(candidate, LINES[lid].speed);
