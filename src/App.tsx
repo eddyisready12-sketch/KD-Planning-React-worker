@@ -3673,6 +3673,11 @@ export default function App() {
         if (prioritizedEntries.length === 0) return [];
 
         const lid = prioritizedEntries[0].order.line;
+        const isOperatorPrioTwoBulk = (order: Order) =>
+          normalizePkg(order.pkg) === 'bulk' &&
+          order.status === 'planned' &&
+          !order.arrivedTime &&
+          !order.holdLoadTime;
         const stateRank = (key: 'direct' | 'prep' | 'wait') => {
           if (key === 'direct') return 0;
           if (key === 'prep') return 1;
@@ -3733,9 +3738,20 @@ export default function App() {
 
           return sorted;
         };
-        const sortedEntries = manualOperatorOrderLines[selectedLine]
+        const sortedEntriesBase = manualOperatorOrderLines[selectedLine]
           ? prioritizedEntries
           : sortByBestNext(prioritizedEntries, displayedCurrentOrder || null);
+        const sortedEntries = sortedEntriesBase.slice().sort((a, b) => {
+          const aPrioTwoBulk = isOperatorPrioTwoBulk(a.order);
+          const bPrioTwoBulk = isOperatorPrioTwoBulk(b.order);
+          if (aPrioTwoBulk !== bPrioTwoBulk) return aPrioTwoBulk ? 1 : -1;
+          if (aPrioTwoBulk && bPrioTwoBulk) {
+            const aEta = etaToMins(getOrderLoadReferenceTime(a.order)) ?? Number.POSITIVE_INFINITY;
+            const bEta = etaToMins(getOrderLoadReferenceTime(b.order)) ?? Number.POSITIVE_INFINITY;
+            if (aEta !== bEta) return aEta - bEta;
+          }
+          return sortedEntriesBase.indexOf(a) - sortedEntriesBase.indexOf(b);
+        });
         const orderedOrders = sortedEntries.map(entry => entry.order);
         const starts = getScheduledStartsForLine(orderedOrders, lid);
 
