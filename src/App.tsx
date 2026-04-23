@@ -2481,84 +2481,89 @@ export default function App() {
   const deferredPlanningComputationInput = useDeferredValue(planningComputationInput);
 
   const activeOrders = useMemo(() => {
-    const {
-      orders: planningOrders,
-      bunkers: planningBunkers,
-      plannerSort: planningSort
-    } = deferredPlanningComputationInput;
-    const base = planningOrders.filter(o => o.status !== 'completed');
-    
-    if (planningSort === 'efficiency') {
-      const sorted: Order[] = [];
-      const lineIds: LineId[] = [1, 2, 3];
+    console.time('activeOrders');
+    try {
+      const {
+        orders: planningOrders,
+        bunkers: planningBunkers,
+        plannerSort: planningSort
+      } = deferredPlanningComputationInput;
+      const base = planningOrders.filter(o => o.status !== 'completed');
       
-      lineIds.forEach(lid => {
-        const lineOrders = base.filter(o => o.line === lid);
-        if (!lineOrders.length) return;
+      if (planningSort === 'efficiency') {
+        const sorted: Order[] = [];
+        const lineIds: LineId[] = [1, 2, 3];
         
-        // Separate Prio 1
-        const prio1 = lineOrders.filter(o => getEffectivePriority(o) === 1).sort((a, b) => (etaToMins(normalizeEta(a.eta)) || 9999) - (etaToMins(normalizeEta(b.eta)) || 9999));
-        const others = lineOrders.filter(o => getEffectivePriority(o) !== 1);
-        
-        const lineSorted: Order[] = [];
-        let current: Order | null = null;
-        
-        // Add Prio 1 first
-        prio1.forEach(o => {
-          lineSorted.push(o);
-          current = o;
-        });
-        
-        // Greedy sort for others to minimize switches
-        const remaining = [...others];
-        while (remaining.length > 0) {
-          let bestIdx = 0;
-          let minSw = 999;
+        lineIds.forEach(lid => {
+          const lineOrders = base.filter(o => o.line === lid);
+          if (!lineOrders.length) return;
           
-          for (let i = 0; i < remaining.length; i++) {
-            const sw = swCount(current, remaining[i], planningBunkers[lid]);
-            if (sw < minSw) {
-              minSw = sw;
-              bestIdx = i;
-            } else if (sw === minSw) {
-              // Tie-break with ETA
-              const etaA = etaToMins(normalizeEta(remaining[i].eta)) || 9999;
-              const etaB = etaToMins(normalizeEta(remaining[bestIdx].eta)) || 9999;
-              if (etaA < etaB) bestIdx = i;
+          // Separate Prio 1
+          const prio1 = lineOrders.filter(o => getEffectivePriority(o) === 1).sort((a, b) => (etaToMins(normalizeEta(a.eta)) || 9999) - (etaToMins(normalizeEta(b.eta)) || 9999));
+          const others = lineOrders.filter(o => getEffectivePriority(o) !== 1);
+          
+          const lineSorted: Order[] = [];
+          let current: Order | null = null;
+          
+          // Add Prio 1 first
+          prio1.forEach(o => {
+            lineSorted.push(o);
+            current = o;
+          });
+          
+          // Greedy sort for others to minimize switches
+          const remaining = [...others];
+          while (remaining.length > 0) {
+            let bestIdx = 0;
+            let minSw = 999;
+            
+            for (let i = 0; i < remaining.length; i++) {
+              const sw = swCount(current, remaining[i], planningBunkers[lid]);
+              if (sw < minSw) {
+                minSw = sw;
+                bestIdx = i;
+              } else if (sw === minSw) {
+                // Tie-break with ETA
+                const etaA = etaToMins(normalizeEta(remaining[i].eta)) || 9999;
+                const etaB = etaToMins(normalizeEta(remaining[bestIdx].eta)) || 9999;
+                if (etaA < etaB) bestIdx = i;
+              }
             }
+            
+            const picked = remaining.splice(bestIdx, 1)[0];
+            lineSorted.push(picked);
+            current = picked;
           }
           
-          const picked = remaining.splice(bestIdx, 1)[0];
-          lineSorted.push(picked);
-          current = picked;
-        }
+          sorted.push(...lineSorted);
+        });
         
-        sorted.push(...lineSorted);
-      });
-      
-      return sorted;
-    }
-
-    return base.sort((a, b) => {
-      if (planningSort === 'eta') {
-        const etaA = a.pkg === 'bulk' && a.status !== 'arrived'
-          ? 9999
-          : (etaToMins(normalizeEta(a.eta)) || 9999);
-        const etaB = b.pkg === 'bulk' && b.status !== 'arrived'
-          ? 9999
-          : (etaToMins(normalizeEta(b.eta)) || 9999);
-        return etaA - etaB;
+        return sorted;
       }
-      if (planningSort === 'prio') return getEffectivePriority(a) - getEffectivePriority(b);
-      if (planningSort === 'customer') return a.customer.localeCompare(b.customer);
-      
-      const effA = getEffectivePriority(a);
-      const effB = getEffectivePriority(b);
-      if (effA !== effB) return effA - effB;
-      const etaA = etaToMins(normalizeEta(a.eta)) || 9999;
-      const etaB = etaToMins(normalizeEta(b.eta)) || 9999;
-      return etaA - etaB;
-    });
+
+      return base.sort((a, b) => {
+        if (planningSort === 'eta') {
+          const etaA = a.pkg === 'bulk' && a.status !== 'arrived'
+            ? 9999
+            : (etaToMins(normalizeEta(a.eta)) || 9999);
+          const etaB = b.pkg === 'bulk' && b.status !== 'arrived'
+            ? 9999
+            : (etaToMins(normalizeEta(b.eta)) || 9999);
+          return etaA - etaB;
+        }
+        if (planningSort === 'prio') return getEffectivePriority(a) - getEffectivePriority(b);
+        if (planningSort === 'customer') return a.customer.localeCompare(b.customer);
+        
+        const effA = getEffectivePriority(a);
+        const effB = getEffectivePriority(b);
+        if (effA !== effB) return effA - effB;
+        const etaA = etaToMins(normalizeEta(a.eta)) || 9999;
+        const etaB = etaToMins(normalizeEta(b.eta)) || 9999;
+        return etaA - etaB;
+      });
+    } finally {
+      console.timeEnd('activeOrders');
+    }
   }, [deferredPlanningComputationInput, getEffectivePriority]);
   const completedOrderCount = useMemo(
     () => orders.reduce((count, order) => count + (order.status === 'completed' ? 1 : 0), 0),
@@ -2706,55 +2711,65 @@ export default function App() {
   );
 
   const schedule = useMemo(() => {
-    if (!isOperatorView && !isPlannerView) {
-      return { 1: [], 2: [], 3: [] } as Record<LineId, Date[]>;
+    console.time('schedule');
+    try {
+      if (!isOperatorView && !isPlannerView) {
+        return { 1: [], 2: [], 3: [] } as Record<LineId, Date[]>;
+      }
+      const res: Record<LineId, Date[]> = { 1: [], 2: [], 3: [] };
+      lineIds.forEach(lid => {
+        const lineOrders = lineOrdersByLine[lid];
+        res[lid] = getScheduledStartsForLine(lineOrders, lid);
+      });
+      return res;
+    } finally {
+      console.timeEnd('schedule');
     }
-    const res: Record<LineId, Date[]> = { 1: [], 2: [], 3: [] };
-    lineIds.forEach(lid => {
-      const lineOrders = lineOrdersByLine[lid];
-      res[lid] = getScheduledStartsForLine(lineOrders, lid);
-    });
-    return res;
   }, [isOperatorView, isPlannerView, lineIds, lineOrdersByLine, config, bunkers, lineTiming]);
 
   const lineTimelineByLine = useMemo(() => {
-    if (!isOperatorView && !isPlannerView) {
-      return { 1: [], 2: [], 3: [] } as Record<LineId, ScheduledLineEntry[]>;
+    console.time('lineTimelineByLine');
+    try {
+      if (!isOperatorView && !isPlannerView) {
+        return { 1: [], 2: [], 3: [] } as Record<LineId, ScheduledLineEntry[]>;
+      }
+      const res: Record<LineId, ScheduledLineEntry[]> = { 1: [], 2: [], 3: [] };
+        lineIds.forEach(lid => {
+            const lineOrders = lineOrdersByLine[lid];
+            const starts = schedule[lid];
+            let cursorEnd: Date | null = null;
+            res[lid] = lineOrders.map((order, index) => {
+              const scheduledStart = starts[index] || starts[0] || planningTimeRef.current;
+              const prevOrder = index > 0 ? lineOrders[index - 1] : null;
+              const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
+              const sw = swMats.length;
+              const duration = rt(order, LINES[lid].speed);
+              const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
+              let startTime = cursorEnd ? new Date(cursorEnd) : scheduledStart;
+              let prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
+
+              const runningStart = getRunningOrderStart(order);
+              if (runningStart) {
+                prodStart = runningStart;
+                startTime = new Date(prodStart.getTime() - transitionMinutes * 60000);
+              }
+
+              const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
+              if (heldLoadDateTime && prodStart.getTime() < heldLoadDateTime.getTime()) {
+                const shiftMs = heldLoadDateTime.getTime() - prodStart.getTime();
+                startTime = new Date(startTime.getTime() + shiftMs);
+                prodStart = new Date(prodStart.getTime() + shiftMs);
+              }
+
+              const endTime = new Date(prodStart.getTime() + duration * 60000);
+              cursorEnd = endTime;
+              return { order, startTime, prodStart, endTime, swMats, sw, duration };
+            });
+        });
+      return res;
+    } finally {
+      console.timeEnd('lineTimelineByLine');
     }
-    const res: Record<LineId, ScheduledLineEntry[]> = { 1: [], 2: [], 3: [] };
-      lineIds.forEach(lid => {
-          const lineOrders = lineOrdersByLine[lid];
-          const starts = schedule[lid];
-          let cursorEnd: Date | null = null;
-          res[lid] = lineOrders.map((order, index) => {
-            const scheduledStart = starts[index] || starts[0] || planningTimeRef.current;
-            const prevOrder = index > 0 ? lineOrders[index - 1] : null;
-            const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
-            const sw = swMats.length;
-            const duration = rt(order, LINES[lid].speed);
-            const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
-            let startTime = cursorEnd ? new Date(cursorEnd) : scheduledStart;
-            let prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
-
-            const runningStart = getRunningOrderStart(order);
-            if (runningStart) {
-              prodStart = runningStart;
-              startTime = new Date(prodStart.getTime() - transitionMinutes * 60000);
-            }
-
-            const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
-            if (heldLoadDateTime && prodStart.getTime() < heldLoadDateTime.getTime()) {
-              const shiftMs = heldLoadDateTime.getTime() - prodStart.getTime();
-              startTime = new Date(startTime.getTime() + shiftMs);
-              prodStart = new Date(prodStart.getTime() + shiftMs);
-            }
-
-            const endTime = new Date(prodStart.getTime() + duration * 60000);
-            cursorEnd = endTime;
-            return { order, startTime, prodStart, endTime, swMats, sw, duration };
-          });
-      });
-    return res;
   }, [isOperatorView, isPlannerView, lineIds, lineOrdersByLine, schedule, bunkers, config, getTransitionMinutes]);
 
   const lineTimelineEntryByOrderId = useMemo(() => {
@@ -3652,151 +3667,156 @@ export default function App() {
   const visiblePlannerTriggers = activePlannerTriggerRows;
 
   const operatorDisplayEntries = useMemo(() => {
-      if (!isOperatorView) return [];
+      console.time('operatorDisplayEntries');
+      try {
+        if (!isOperatorView) return [];
 
-      const nowMinutes = planningTimeRef.current.getHours() * 60 + planningTimeRef.current.getMinutes();
-  
-      const prioritizedEntries = plannedEntries
-        .map((entry, index) => ({
-          ...entry,
-          originalIndex: index,
-          operatorState: getOperatorOrderState(entry.order, index, nowMinutes)
-        }));
-      if (prioritizedEntries.length === 0) return [];
+        const nowMinutes = planningTimeRef.current.getHours() * 60 + planningTimeRef.current.getMinutes();
+    
+        const prioritizedEntries = plannedEntries
+          .map((entry, index) => ({
+            ...entry,
+            originalIndex: index,
+            operatorState: getOperatorOrderState(entry.order, index, nowMinutes)
+          }));
+        if (prioritizedEntries.length === 0) return [];
 
-      const lid = prioritizedEntries[0].order.line;
-      const stateRank = (key: 'direct' | 'prep' | 'wait') => {
-        if (key === 'direct') return 0;
-        if (key === 'prep') return 1;
-        return 2;
-      };
-      const lineBunkerScope = bunkers[lid] || [];
-      const switchCountCache = new Map<string, number>();
-      const transitionMinutesCache = new Map<string, number>();
-      const getOrderPairCacheKey = (prevOrder: Order | null, nextOrder: Order) => `${prevOrder?.id ?? 'null'}|${nextOrder.id}`;
-      const getCachedSwitchCount = (prevOrder: Order | null, nextOrder: Order) => {
-        const cacheKey = getOrderPairCacheKey(prevOrder, nextOrder);
-        const cached = switchCountCache.get(cacheKey);
-        if (cached !== undefined) return cached;
-        const computed = getSwitchMaterials(prevOrder, nextOrder, lineBunkerScope).length;
-        switchCountCache.set(cacheKey, computed);
-        return computed;
-      };
-      const getCachedTransitionMinutes = (prevOrder: Order | null, nextOrder: Order) => {
-        const cacheKey = getOrderPairCacheKey(prevOrder, nextOrder);
-        const cached = transitionMinutesCache.get(cacheKey);
-        if (cached !== undefined) return cached;
-        const computed = getTransitionMinutes(lid, prevOrder, nextOrder);
-        transitionMinutesCache.set(cacheKey, computed);
-        return computed;
-      };
-      const sortByBestNext = <T extends typeof prioritizedEntries[number]>(
-        entries: T[],
-        initialReferenceOrder: Order | null
-      ) => {
-        const remaining = entries.slice();
-        const sorted: T[] = [];
-        let referenceOrder = initialReferenceOrder;
-
-        while (remaining.length > 0) {
-          remaining.sort((a, b) => {
-            const rankDiff = stateRank(a.operatorState.key) - stateRank(b.operatorState.key);
-            if (rankDiff !== 0) return rankDiff;
-
-            const aSwitches = a.operatorState.key === 'direct' ? 0 : getCachedSwitchCount(referenceOrder, a.order);
-            const bSwitches = b.operatorState.key === 'direct' ? 0 : getCachedSwitchCount(referenceOrder, b.order);
-            if (aSwitches !== bSwitches) return aSwitches - bSwitches;
-
-            const aTransition = a.operatorState.key === 'direct' ? 0 : getCachedTransitionMinutes(referenceOrder, a.order);
-            const bTransition = b.operatorState.key === 'direct' ? 0 : getCachedTransitionMinutes(referenceOrder, b.order);
-            if (aTransition !== bTransition) return aTransition - bTransition;
-
-            const aEta = etaToMins(getOrderLoadReferenceTime(a.order)) ?? Number.POSITIVE_INFINITY;
-            const bEta = etaToMins(getOrderLoadReferenceTime(b.order)) ?? Number.POSITIVE_INFINITY;
-            if (aEta !== bEta) return aEta - bEta;
-
-            return a.originalIndex - b.originalIndex;
-          });
-
-          const [next] = remaining.splice(0, 1);
-          sorted.push(next);
-          referenceOrder = next.order;
-        }
-
-        return sorted;
-      };
-      const sortedEntries = manualOperatorOrderLines[selectedLine]
-        ? prioritizedEntries
-        : sortByBestNext(prioritizedEntries, displayedCurrentOrder || null);
-      const orderedOrders = sortedEntries.map(entry => entry.order);
-      const starts = getScheduledStartsForLine(orderedOrders, lid);
-
-      let cursorEnd: Date | null = null;
-      if (!displayedCurrentOrder && sortedEntries.length > 0) {
-        const firstOrder = sortedEntries[0].order;
-        const firstPrevOrder = null;
-        const firstStartTime = starts[0];
-        const firstTransitionMinutes = getTransitionMinutes(lid, firstPrevOrder, firstOrder);
-        const firstBaseProdStart = new Date(firstStartTime.getTime() + firstTransitionMinutes * 60000);
-        const nowTime = planningTimeRef.current.getTime();
-        if (firstBaseProdStart.getTime() < nowTime) {
-          cursorEnd = new Date(nowTime - firstTransitionMinutes * 60000);
-        }
-      }
-      return sortedEntries.map((entry, index) => {
-        const order = entry.order;
-        const prevOrder = index > 0 ? orderedOrders[index - 1] : null;
-        const scheduledStart = starts[index] || starts[0] || planningTimeRef.current;
-        const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
-        const sw = swMats.length;
-        const duration = rt(order, LINES[lid].speed);
-        const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
-        let startTime = cursorEnd ? new Date(cursorEnd) : new Date(scheduledStart.getTime() + operatorRuntimeShiftMs);
-        let prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
-        if (index === 0 && displayedCurrentOrder?.status === 'running' && displayedCurrentActualEnd && prodStart.getTime() < displayedCurrentActualEnd.getTime()) {
-          prodStart = new Date(displayedCurrentActualEnd);
-          startTime = new Date(prodStart.getTime() - transitionMinutes * 60000);
-        }
-        const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
-        const bulkLoadDateTime = normalizePkg(order.pkg) === 'bulk'
-          ? getOrderLoadReferenceDateTime(order, prodStart)
-          : null;
-        const earliestLoadDateTime = heldLoadDateTime || bulkLoadDateTime;
-        if (earliestLoadDateTime && prodStart.getTime() < earliestLoadDateTime.getTime()) {
-          const shiftMs = earliestLoadDateTime.getTime() - prodStart.getTime();
-          startTime = new Date(startTime.getTime() + shiftMs);
-          prodStart = new Date(prodStart.getTime() + shiftMs);
-        }
-        const endTime = new Date(prodStart.getTime() + duration * 60000);
-        cursorEnd = endTime;
-        let operatorState = getOperatorOrderState(order, index, nowMinutes);
-        const loadDateTime = getOrderLoadReferenceDateTime(order, prodStart);
-        if (
-          operatorState.key === 'direct' &&
-          normalizePkg(order.pkg) === 'bulk' &&
-          loadDateTime &&
-          planningTimeRef.current.getTime() < loadDateTime.getTime()
-        ) {
-          operatorState = {
-            label: 'Wachten',
-            cls: 'bg-blue-100 text-blue-700',
-            reason: `Wacht tot laadtijd ${fmt(loadDateTime)}`,
-            key: 'wait'
-          };
-        }
-
-        return {
-          ...entry,
-          startTime,
-          prodStart,
-          endTime,
-          swMats,
-          sw,
-          duration,
-          operatorState
+        const lid = prioritizedEntries[0].order.line;
+        const stateRank = (key: 'direct' | 'prep' | 'wait') => {
+          if (key === 'direct') return 0;
+          if (key === 'prep') return 1;
+          return 2;
         };
-      });
-    }, [isOperatorView, plannedEntries, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime, manualOperatorOrderLines]);
+        const lineBunkerScope = bunkers[lid] || [];
+        const switchCountCache = new Map<string, number>();
+        const transitionMinutesCache = new Map<string, number>();
+        const getOrderPairCacheKey = (prevOrder: Order | null, nextOrder: Order) => `${prevOrder?.id ?? 'null'}|${nextOrder.id}`;
+        const getCachedSwitchCount = (prevOrder: Order | null, nextOrder: Order) => {
+          const cacheKey = getOrderPairCacheKey(prevOrder, nextOrder);
+          const cached = switchCountCache.get(cacheKey);
+          if (cached !== undefined) return cached;
+          const computed = getSwitchMaterials(prevOrder, nextOrder, lineBunkerScope).length;
+          switchCountCache.set(cacheKey, computed);
+          return computed;
+        };
+        const getCachedTransitionMinutes = (prevOrder: Order | null, nextOrder: Order) => {
+          const cacheKey = getOrderPairCacheKey(prevOrder, nextOrder);
+          const cached = transitionMinutesCache.get(cacheKey);
+          if (cached !== undefined) return cached;
+          const computed = getTransitionMinutes(lid, prevOrder, nextOrder);
+          transitionMinutesCache.set(cacheKey, computed);
+          return computed;
+        };
+        const sortByBestNext = <T extends typeof prioritizedEntries[number]>(
+          entries: T[],
+          initialReferenceOrder: Order | null
+        ) => {
+          const remaining = entries.slice();
+          const sorted: T[] = [];
+          let referenceOrder = initialReferenceOrder;
+
+          while (remaining.length > 0) {
+            remaining.sort((a, b) => {
+              const rankDiff = stateRank(a.operatorState.key) - stateRank(b.operatorState.key);
+              if (rankDiff !== 0) return rankDiff;
+
+              const aSwitches = a.operatorState.key === 'direct' ? 0 : getCachedSwitchCount(referenceOrder, a.order);
+              const bSwitches = b.operatorState.key === 'direct' ? 0 : getCachedSwitchCount(referenceOrder, b.order);
+              if (aSwitches !== bSwitches) return aSwitches - bSwitches;
+
+              const aTransition = a.operatorState.key === 'direct' ? 0 : getCachedTransitionMinutes(referenceOrder, a.order);
+              const bTransition = b.operatorState.key === 'direct' ? 0 : getCachedTransitionMinutes(referenceOrder, b.order);
+              if (aTransition !== bTransition) return aTransition - bTransition;
+
+              const aEta = etaToMins(getOrderLoadReferenceTime(a.order)) ?? Number.POSITIVE_INFINITY;
+              const bEta = etaToMins(getOrderLoadReferenceTime(b.order)) ?? Number.POSITIVE_INFINITY;
+              if (aEta !== bEta) return aEta - bEta;
+
+              return a.originalIndex - b.originalIndex;
+            });
+
+            const [next] = remaining.splice(0, 1);
+            sorted.push(next);
+            referenceOrder = next.order;
+          }
+
+          return sorted;
+        };
+        const sortedEntries = manualOperatorOrderLines[selectedLine]
+          ? prioritizedEntries
+          : sortByBestNext(prioritizedEntries, displayedCurrentOrder || null);
+        const orderedOrders = sortedEntries.map(entry => entry.order);
+        const starts = getScheduledStartsForLine(orderedOrders, lid);
+
+        let cursorEnd: Date | null = null;
+        if (!displayedCurrentOrder && sortedEntries.length > 0) {
+          const firstOrder = sortedEntries[0].order;
+          const firstPrevOrder = null;
+          const firstStartTime = starts[0];
+          const firstTransitionMinutes = getTransitionMinutes(lid, firstPrevOrder, firstOrder);
+          const firstBaseProdStart = new Date(firstStartTime.getTime() + firstTransitionMinutes * 60000);
+          const nowTime = planningTimeRef.current.getTime();
+          if (firstBaseProdStart.getTime() < nowTime) {
+            cursorEnd = new Date(nowTime - firstTransitionMinutes * 60000);
+          }
+        }
+        return sortedEntries.map((entry, index) => {
+          const order = entry.order;
+          const prevOrder = index > 0 ? orderedOrders[index - 1] : null;
+          const scheduledStart = starts[index] || starts[0] || planningTimeRef.current;
+          const swMats = index > 0 ? getSwitchMaterials(prevOrder, order, bunkers[lid]) : [];
+          const sw = swMats.length;
+          const duration = rt(order, LINES[lid].speed);
+          const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
+          let startTime = cursorEnd ? new Date(cursorEnd) : new Date(scheduledStart.getTime() + operatorRuntimeShiftMs);
+          let prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
+          if (index === 0 && displayedCurrentOrder?.status === 'running' && displayedCurrentActualEnd && prodStart.getTime() < displayedCurrentActualEnd.getTime()) {
+            prodStart = new Date(displayedCurrentActualEnd);
+            startTime = new Date(prodStart.getTime() - transitionMinutes * 60000);
+          }
+          const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
+          const bulkLoadDateTime = normalizePkg(order.pkg) === 'bulk'
+            ? getOrderLoadReferenceDateTime(order, prodStart)
+            : null;
+          const earliestLoadDateTime = heldLoadDateTime || bulkLoadDateTime;
+          if (earliestLoadDateTime && prodStart.getTime() < earliestLoadDateTime.getTime()) {
+            const shiftMs = earliestLoadDateTime.getTime() - prodStart.getTime();
+            startTime = new Date(startTime.getTime() + shiftMs);
+            prodStart = new Date(prodStart.getTime() + shiftMs);
+          }
+          const endTime = new Date(prodStart.getTime() + duration * 60000);
+          cursorEnd = endTime;
+          let operatorState = getOperatorOrderState(order, index, nowMinutes);
+          const loadDateTime = getOrderLoadReferenceDateTime(order, prodStart);
+          if (
+            operatorState.key === 'direct' &&
+            normalizePkg(order.pkg) === 'bulk' &&
+            loadDateTime &&
+            planningTimeRef.current.getTime() < loadDateTime.getTime()
+          ) {
+            operatorState = {
+              label: 'Wachten',
+              cls: 'bg-blue-100 text-blue-700',
+              reason: `Wacht tot laadtijd ${fmt(loadDateTime)}`,
+              key: 'wait'
+            };
+          }
+
+          return {
+            ...entry,
+            startTime,
+            prodStart,
+            endTime,
+            swMats,
+            sw,
+            duration,
+            operatorState
+          };
+        });
+      } finally {
+        console.timeEnd('operatorDisplayEntries');
+      }
+  }, [isOperatorView, plannedEntries, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime, manualOperatorOrderLines]);
 
   const nextOperatorOrder = useMemo(
     () => operatorDisplayEntries[0]?.order || null,
