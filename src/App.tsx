@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
   LineId, Order, Bunker, Melding, Storing, AppConfig, Truck, PlannerTrigger, OrderComponent, BagVolumeRule
 } from './types';
-import { useRef, useDeferredValue, startTransition } from 'react';
+import { useRef, useDeferredValue, useTransition } from 'react';
 import { 
   LINES, DEFAULT_CFG, INITIAL_BUNKERS 
 } from './constants';
@@ -332,6 +332,7 @@ export default function App() {
   const draggedOperatorOrderIdRef = useRef<number | null>(null);
   const [operatorDropTargetId, setOperatorDropTargetId] = useState<number | null>(null);
   const [manualOperatorOrderLines, setManualOperatorOrderLines] = useState<Partial<Record<LineId, boolean>>>({});
+  const [isUiTransitionPending, startUiTransition] = useTransition();
   const deferredPlannerSearch = useDeferredValue(plannerSearch);
   const deferredChauffeurSearch = useDeferredValue(chauffeurSearch);
   const isPlannerView = view === 'planner';
@@ -341,25 +342,25 @@ export default function App() {
   const isCompletedTabVisible = isPlannerView && plannerTab === 'voltooid';
   const isTruckTabVisible = isPlannerView && plannerTab === 'vrachtwagens';
   const changeView = useCallback((nextView: typeof view) => {
-    startTransition(() => {
+    startUiTransition(() => {
       setView(current => current === nextView ? current : nextView);
     });
-  }, []);
+  }, [startUiTransition]);
   const changePlannerTab = useCallback((nextTab: typeof plannerTab) => {
-    startTransition(() => {
+    startUiTransition(() => {
       setPlannerTab(current => current === nextTab ? current : nextTab);
     });
-  }, []);
+  }, [startUiTransition]);
   const changeSelectedLine = useCallback((nextLine: LineId) => {
-    startTransition(() => {
+    startUiTransition(() => {
       setSelectedLine(current => current === nextLine ? current : nextLine);
     });
-  }, []);
+  }, [startUiTransition]);
   const changePlannerLineFilter = useCallback((nextLine: number) => {
-    startTransition(() => {
+    startUiTransition(() => {
       setPlannerLineFilter(current => current === nextLine ? current : nextLine);
     });
-  }, []);
+  }, [startUiTransition]);
   const [isClearingOrders, setIsClearingOrders] = useState(false);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
   const [csvImportFeedback, setCsvImportFeedback] = useState<{ type: 'ok' | 'error' | 'busy'; text: string } | null>(null);
@@ -1530,7 +1531,8 @@ export default function App() {
     setPlannedOrderIdsByLine,
     getScheduledStartsForLine,
     getTransitionMinutes,
-    fillSimpleSingleGapWithinLine
+    fillSimpleSingleGapWithinLine,
+    isGapFillPending
   } = usePlanner({
     bunkers,
     config,
@@ -2637,10 +2639,12 @@ export default function App() {
 
           const next: Record<LineId, number[]> = { 1: [], 2: [], 3: [] };
           const recalculatedOrders = new Map<number, Order>();
-          lineIds.forEach(lid => {
+          for (const lid of lineIds) {
             const sourceOrders = activeOrders.filter(o => o.line === lid);
             const basePlan = buildLinePlan(lid, sourceOrders);
-            const quickGapPlan = fillQuickGapWithinLine(lid, basePlan);
+            const quickGapPlan = sourceOrders.length >= 60
+              ? await fillSimpleSingleGapWithinLine(lid, basePlan)
+              : fillQuickGapWithinLine(lid, basePlan);
             const finalPlan = planRespectsLoadWindows(lid, quickGapPlan)
               ? quickGapPlan
               : (planRespectsLoadWindows(lid, basePlan) ? basePlan : sourceOrders);
@@ -2652,10 +2656,12 @@ export default function App() {
                 ? { ...order, date: scheduledDate }
                 : order);
             });
-          });
+          }
           const nextOrders = orders.map(order => recalculatedOrders.get(order.id) || order);
-          setOrders(nextOrders);
-          setPlannedOrderIdsByLine(next);
+          startUiTransition(() => {
+            setOrders(nextOrders);
+            setPlannedOrderIdsByLine(next);
+          });
           if (isSupabaseConfigured()) {
             await writeOrdersToSupabase(nextOrders);
             await writePlannedOrderIdsToSupabase(next);
@@ -2671,7 +2677,7 @@ export default function App() {
         }
       })();
     }, 0);
-  }, [activeOrders, buildLinePlan, fillQuickGapWithinLine, getScheduledStartsForLine, orders, planRespectsLoadWindows, plannerRecalcLock]);
+  }, [activeOrders, buildLinePlan, fillQuickGapWithinLine, fillSimpleSingleGapWithinLine, getScheduledStartsForLine, lineIds, orders, planRespectsLoadWindows, plannerRecalcLock, startUiTransition]);
 
   const lineOrdersByLine = useMemo(() => {
     const { plannedOrderIdsByLine: deferredPlannedOrderIdsByLine } = deferredPlanningComputationInput;
@@ -4375,6 +4381,12 @@ export default function App() {
         </nav>
 
         <div className="ml-auto flex items-center gap-3">
+          {(isUiTransitionPending || isGapFillPending || isRecalculating) && (
+            <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-blue-500"></span>
+              Planning op achtergrond...
+            </div>
+          )}
           <div className="flex items-center gap-2 px-2.5 py-1.5 border border-gray-200 rounded-full bg-gray-50">
             <div className="text-[11px] text-gray-400 uppercase tracking-wider">Gedraaid</div>
             <div className="text-[13px] font-bold text-grd">{totalCompletedM3.toFixed(1)} m3</div>

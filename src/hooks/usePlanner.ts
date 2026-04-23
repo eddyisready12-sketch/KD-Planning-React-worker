@@ -186,7 +186,9 @@ export function usePlanner({
     return true;
   }, [config, getOrderLoadReferenceTime, getScheduledStartsForLine, getTransitionMinutes]);
 
-  const fillSimpleSingleGapWithinLine = useCallback((lid: LineId, initialPlan: Order[]) => {
+  const [isGapFillPending, setIsGapFillPending] = useState(false);
+
+  const fillSimpleSingleGapWithinLineLocal = useCallback((lid: LineId, initialPlan: Order[]) => {
     if (initialPlan.length < 3) return initialPlan;
 
     let workingPlan = [...initialPlan];
@@ -454,11 +456,91 @@ export function usePlanner({
     return workingPlan;
   }, [getEffectivePriority, getScheduledStartsForLine, getTransitionMinutes, planRespectsLoadWindows, setGapDebug]);
 
+  const fillSimpleSingleGapWithinLine = useCallback(async (lid: LineId, initialPlan: Order[]) => {
+    if (typeof Worker === 'undefined') {
+      return fillSimpleSingleGapWithinLineLocal(lid, initialPlan);
+    }
+
+    const worker = new Worker(new URL('../workers/planningWorker.ts', import.meta.url), { type: 'module' });
+    const requestId = `${Date.now()}-${Math.random()}`;
+    const orderLoadReferenceTimes = Object.fromEntries(
+      initialPlan.map(order => [order.id, getOrderLoadReferenceTime(order)])
+    );
+    const orderEffectivePriorities = Object.fromEntries(
+      initialPlan.map(order => [order.id, getEffectivePriority(order)])
+    );
+
+    setIsGapFillPending(true);
+
+    try {
+      const result = await new Promise<{ plan: Order[]; debugEntries: GapDebugEntry[] }>((resolve, reject) => {
+        const handleMessage = (event: MessageEvent<any>) => {
+          const data = event.data;
+          if (!data || data.id !== requestId) return;
+          worker.removeEventListener('message', handleMessage);
+          worker.removeEventListener('error', handleError);
+          if (data.ok) {
+            resolve({
+              plan: data.plan || initialPlan,
+              debugEntries: data.debugEntries || []
+            });
+            return;
+          }
+          reject(new Error(data.error || 'Planning worker failed'));
+        };
+
+        const handleError = (event: ErrorEvent) => {
+          worker.removeEventListener('message', handleMessage);
+          worker.removeEventListener('error', handleError);
+          reject(event.error || new Error(event.message || 'Planning worker failed'));
+        };
+
+        worker.addEventListener('message', handleMessage);
+        worker.addEventListener('error', handleError);
+        worker.postMessage({
+          id: requestId,
+          type: 'fillSimpleSingleGapWithinLine',
+          payload: {
+            lid,
+            initialPlan,
+            bunkers,
+            config,
+            lineTiming,
+            effectiveFirstOrderStart,
+            orderLoadReferenceTimes,
+            orderEffectivePriorities
+          }
+        });
+      });
+
+      if (result.debugEntries.length > 0 && setGapDebug) {
+        setGapDebug(prev => [...prev.filter(entry => entry.line !== lid), ...result.debugEntries]);
+      }
+
+      return result.plan;
+    } catch {
+      return fillSimpleSingleGapWithinLineLocal(lid, initialPlan);
+    } finally {
+      worker.terminate();
+      setIsGapFillPending(false);
+    }
+  }, [
+    bunkers,
+    config,
+    effectiveFirstOrderStart,
+    fillSimpleSingleGapWithinLineLocal,
+    getEffectivePriority,
+    getOrderLoadReferenceTime,
+    lineTiming,
+    setGapDebug
+  ]);
+
   return {
     plannedOrderIdsByLine,
     setPlannedOrderIdsByLine,
     getScheduledStartsForLine,
     getTransitionMinutes,
-    fillSimpleSingleGapWithinLine
+    fillSimpleSingleGapWithinLine,
+    isGapFillPending
   };
 }
