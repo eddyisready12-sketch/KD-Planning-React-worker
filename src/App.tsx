@@ -788,7 +788,12 @@ export default function App() {
   );
 
   useEffect(() => {
-    setRuntimeMaterialOverrides(materialOverridePairs);
+    console.time('effect:setRuntimeMaterialOverrides');
+    try {
+      setRuntimeMaterialOverrides(materialOverridePairs);
+    } finally {
+      console.timeEnd('effect:setRuntimeMaterialOverrides');
+    }
   }, [materialOverridePairs]);
 
   const getOrderLoadReferenceTime = useCallback(
@@ -2575,26 +2580,31 @@ export default function App() {
   }, [isCompletedTabVisible, orders]);
 
   useEffect(() => {
-    setPlannedOrderIdsByLine(prev => {
-      if (!prev) return prev;
-      const next: Record<LineId, number[]> = { 1: [], 2: [], 3: [] };
-      let changed = false;
+    console.time('effect:setPlannedOrderIdsByLine');
+    try {
+      setPlannedOrderIdsByLine(prev => {
+        if (!prev) return prev;
+        const next: Record<LineId, number[]> = { 1: [], 2: [], 3: [] };
+        let changed = false;
 
-      ([1, 2, 3] as LineId[]).forEach(lid => {
-        const sourceIds = activeOrders.filter(o => o.line === lid).map(o => o.id);
-        const existingIds = (prev[lid] || []).filter(id => sourceIds.includes(id));
-        const missingIds = sourceIds.filter(id => !existingIds.includes(id));
-        next[lid] = [...existingIds, ...missingIds];
-        if (
-          next[lid].length !== (prev[lid] || []).length ||
-          next[lid].some((id, index) => id !== (prev[lid] || [])[index])
-        ) {
-          changed = true;
-        }
+        ([1, 2, 3] as LineId[]).forEach(lid => {
+          const sourceIds = activeOrders.filter(o => o.line === lid).map(o => o.id);
+          const existingIds = (prev[lid] || []).filter(id => sourceIds.includes(id));
+          const missingIds = sourceIds.filter(id => !existingIds.includes(id));
+          next[lid] = [...existingIds, ...missingIds];
+          if (
+            next[lid].length !== (prev[lid] || []).length ||
+            next[lid].some((id, index) => id !== (prev[lid] || [])[index])
+          ) {
+            changed = true;
+          }
+        });
+
+        return changed ? next : prev;
       });
-
-      return changed ? next : prev;
-    });
+    } finally {
+      console.timeEnd('effect:setPlannedOrderIdsByLine');
+    }
   }, [activeOrders]);
 
   const lineIds: LineId[] = [1, 2, 3];
@@ -3493,11 +3503,16 @@ export default function App() {
   }, [plannerVisibleDates]);
 
   useEffect(() => {
-    if (!isPlannerView) return;
-    const hasSelectedDate = plannerVisibleDates.some(date => formatLocalDate(date) === plannerSelectedDate);
-    if (!hasSelectedDate) {
-      const nextVisibleDate = plannerVisibleDates[0] ? formatLocalDate(plannerVisibleDates[0]) : formatLocalDate(planningTimeRef.current);
-      setPlannerSelectedDate(nextVisibleDate);
+    console.time('effect:setPlannerSelectedDate');
+    try {
+      if (!isPlannerView) return;
+      const hasSelectedDate = plannerVisibleDates.some(date => formatLocalDate(date) === plannerSelectedDate);
+      if (!hasSelectedDate) {
+        const nextVisibleDate = plannerVisibleDates[0] ? formatLocalDate(plannerVisibleDates[0]) : formatLocalDate(planningTimeRef.current);
+        setPlannerSelectedDate(nextVisibleDate);
+      }
+    } finally {
+      console.timeEnd('effect:setPlannerSelectedDate');
     }
   }, [isPlannerView, plannerVisibleDates, plannerSelectedDate]);
 
@@ -3922,6 +3937,7 @@ export default function App() {
   }, [nextOrderBunkerSwitches]);
 
   const operatorExecutionCards = useMemo(() => {
+    const operatorTimeReference = planningTimeRef.current;
     return operatorDisplayEntries.slice(0, 3).map((entry) => {
       const order = entry.order;
       const operatorState = entry.operatorState;
@@ -3929,7 +3945,7 @@ export default function App() {
       return {
         id: order.id,
         customer: order.customer,
-        schedule: formatOperatorDateTimeRange(entry.prodStart, entry.endTime, currentTime),
+        schedule: formatOperatorDateTimeRange(entry.prodStart, entry.endTime, operatorTimeReference),
         status: operatorState.key,
         reason: operatorState.reason,
         volume: ev(order).toFixed(1),
@@ -3940,7 +3956,7 @@ export default function App() {
         isBulk: order.pkg.toLowerCase() === 'bulk'
       };
     });
-  }, [operatorDisplayEntries, currentTime]);
+  }, [operatorDisplayEntries]);
 
   const totalCompletedM3 = useMemo(() => 
     orders.reduce((sum, o) => o.status === 'completed' ? sum + ev(o) : sum, 0), 
@@ -4212,12 +4228,17 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!visiblePlannerDrivers.length) {
-      setSelectedDriverName('');
-      return;
-    }
-    if (selectedDriverName && !visiblePlannerDrivers.some(driver => driver.name === selectedDriverName)) {
-      setSelectedDriverName(visiblePlannerDrivers[0].name);
+    console.time('effect:setSelectedDriverName');
+    try {
+      if (!visiblePlannerDrivers.length) {
+        setSelectedDriverName('');
+        return;
+      }
+      if (selectedDriverName && !visiblePlannerDrivers.some(driver => driver.name === selectedDriverName)) {
+        setSelectedDriverName(visiblePlannerDrivers[0].name);
+      }
+    } finally {
+      console.timeEnd('effect:setSelectedDriverName');
     }
   }, [visiblePlannerDrivers, selectedDriverName]);
 
