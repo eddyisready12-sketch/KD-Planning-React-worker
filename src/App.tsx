@@ -338,10 +338,12 @@ export default function App() {
   const deferredChauffeurSearch = useDeferredValue(chauffeurSearch);
   const isPlannerView = view === 'planner';
   const isOperatorView = view === 'operator';
+  const isOrderQueueTabVisible = isPlannerView && plannerTab === 'wachtrij';
   const isDayRosterTabVisible = isPlannerView && plannerTab === 'dagrooster';
   const isChauffeurTabVisible = isPlannerView && plannerTab === 'chauffeurs';
   const isCompletedTabVisible = isPlannerView && plannerTab === 'voltooid';
   const isTruckTabVisible = isPlannerView && plannerTab === 'vrachtwagens';
+  const needsPlannerDisplayEntries = isOrderQueueTabVisible || isDayRosterTabVisible;
   const changeView = useCallback((nextView: typeof view) => {
     startUiTransition(() => {
       setView(current => current === nextView ? current : nextView);
@@ -3459,7 +3461,7 @@ export default function App() {
   }, [storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, getOrderLoadReferenceTime]);
 
   const plannerDisplayEntriesByLine = useMemo(() => {
-    if (!isPlannerView) {
+    if (!needsPlannerDisplayEntries) {
       return { 1: [], 2: [], 3: [] } as Record<LineId, ScheduledLineEntry[]>;
     }
     return {
@@ -3467,17 +3469,20 @@ export default function App() {
       2: getPlannerDisplayEntries(lineTimelineByLine[2]),
       3: getPlannerDisplayEntries(lineTimelineByLine[3])
     };
-  }, [isPlannerView, lineTimelineByLine, getPlannerDisplayEntries]);
+  }, [needsPlannerDisplayEntries, lineTimelineByLine, getPlannerDisplayEntries]);
 
   const plannerVisibleDates = useMemo(() => {
     const allDates = lineIds
-      .flatMap(lid => plannerDisplayEntriesByLine[lid].map(entry => formatLocalDate(entry.prodStart)))
+      .flatMap(lid => lineTimelineByLine[lid].map(entry => {
+        const runningStart = getRunningOrderStart(entry.order);
+        return formatLocalDate(runningStart || entry.prodStart);
+      }))
       .filter(Boolean);
     return Array.from(new Set(allDates))
       .sort()
       .map(value => parseLocalDate(value))
       .filter(Boolean) as Date[];
-  }, [lineIds, plannerDisplayEntriesByLine]);
+  }, [lineIds, lineTimelineByLine]);
 
   const plannerWeekDates = useMemo(() => {
     const anchor = plannerVisibleDates[0] || planningTimeRef.current;
@@ -3494,7 +3499,7 @@ export default function App() {
   }, [isPlannerView, plannerVisibleDates, plannerSelectedDate]);
 
   const filteredPlannerDisplayEntriesByLine = useMemo(() => {
-    if (!isPlannerView) {
+    if (!needsPlannerDisplayEntries) {
       return { 1: [], 2: [], 3: [] } as Record<LineId, ScheduledLineEntry[]>;
     }
 
@@ -3507,13 +3512,18 @@ export default function App() {
       2: plannerDisplayEntriesByLine[2].filter(isVisibleOnSelectedDate),
       3: plannerDisplayEntriesByLine[3].filter(isVisibleOnSelectedDate)
     };
-  }, [isPlannerView, plannerDisplayEntriesByLine, plannerSelectedDate]);
+  }, [needsPlannerDisplayEntries, plannerDisplayEntriesByLine, plannerSelectedDate]);
 
-  const plannerDisplayIndexByLine = useMemo(() => ({
-    1: new Map(filteredPlannerDisplayEntriesByLine[1].map((entry, index) => [entry.order.id, index])),
-    2: new Map(filteredPlannerDisplayEntriesByLine[2].map((entry, index) => [entry.order.id, index])),
-    3: new Map(filteredPlannerDisplayEntriesByLine[3].map((entry, index) => [entry.order.id, index]))
-  }), [filteredPlannerDisplayEntriesByLine]);
+  const plannerDisplayIndexByLine = useMemo(() => {
+    if (!isOrderQueueTabVisible) {
+      return { 1: new Map(), 2: new Map(), 3: new Map() } as Record<LineId, Map<number, number>>;
+    }
+    return {
+      1: new Map(filteredPlannerDisplayEntriesByLine[1].map((entry, index) => [entry.order.id, index])),
+      2: new Map(filteredPlannerDisplayEntriesByLine[2].map((entry, index) => [entry.order.id, index])),
+      3: new Map(filteredPlannerDisplayEntriesByLine[3].map((entry, index) => [entry.order.id, index]))
+    };
+  }, [isOrderQueueTabVisible, filteredPlannerDisplayEntriesByLine]);
 
   const dayRosterStartMinutes = 5 * 60 + 15;
   const dayRosterEndMinutes = 23 * 60;
