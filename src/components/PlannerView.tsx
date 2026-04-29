@@ -78,6 +78,7 @@ export const PlannerView = React.memo(function PlannerView(props: any) {
     minutesToTimeString,
     newDriverForm,
     openEtaEdit,
+    operatorSchemaEntriesByLine,
     parseLocalDate,
     plannedActiveOrders,
     plannerDisplayIndexByLine,
@@ -552,7 +553,7 @@ export const PlannerView = React.memo(function PlannerView(props: any) {
                                 const s = plannerSearch.toLowerCase();
                                 return o.customer.toLowerCase().includes(s) || o.num.includes(s) || o.recipe.toLowerCase().includes(s);
                               });
-                            const plannerDisplayTimelineCandidates = filteredPlannerDisplayEntriesByLine[lid].filter(entry => {
+                            const plannerDisplayTimelineCandidates = (operatorSchemaEntriesByLine?.[lid] || filteredPlannerDisplayEntriesByLine[lid]).filter(entry => {
                               const o = entry.order;
                               const s = plannerSearch.toLowerCase();
                               return o.customer.toLowerCase().includes(s) || o.num.includes(s) || o.recipe.toLowerCase().includes(s);
@@ -568,42 +569,16 @@ export const PlannerView = React.memo(function PlannerView(props: any) {
                             const runningProgress = runningEntry && runningStart
                               ? Math.max(0, Math.min(99, ((currentTime.getTime() - runningStart.getTime()) / (runningEntry.duration * 60000)) * 100))
                               : 0;
-                            const lineTimelineIndexByOrderId = new Map<number, number>(lineTimelineByLine[lid].map((entry, index) => [entry.order.id, index]));
-                            const runningIndex = runningEntry ? (lineTimelineIndexByOrderId.get(runningEntry.order.id) ?? -1) : -1;
                             const plannerDisplayTimeline = plannerDisplayTimelineCandidates.filter(entry => {
                               if (entry.order.status === 'running') return false;
-                              if (runningIndex < 0) return true;
-                              const entryIndex = lineTimelineIndexByOrderId.get(entry.order.id) ?? -1;
-                              return entryIndex > runningIndex;
+                              return true;
                             });
-                            const plannerLineDisplayTimesByOrderId = new Map<number, { start: Date; end: Date }>();
-                            if (runningEnd && runningOrder && runningIndex >= 0) {
-                              let cursor = runningEnd;
-                              let previousOrder: Order | null = runningOrder;
-                              plannerDisplayTimeline.forEach((entry, indexAfterRunning) => {
-                                // Keep the planner line view equal to the operator dashboard:
-                                // the first direct order after a running order starts at the running end.
-                                const transitionMinutes = indexAfterRunning === 0 && entry.plannerState?.key === 'direct'
-                                  ? 0
-                                  : getTransitionMinutes(lid, previousOrder, entry.order);
-                                let start = new Date(cursor.getTime() + transitionMinutes * 60000);
-                                const heldLoadDateTime = getHeldLoadDateTime(entry.order, start);
-                                if (heldLoadDateTime && start.getTime() < heldLoadDateTime.getTime()) {
-                                  start = heldLoadDateTime;
-                                }
-                                const end = new Date(start.getTime() + entry.duration * 60000);
-                                plannerLineDisplayTimesByOrderId.set(entry.order.id, { start, end });
-                                cursor = end;
-                                previousOrder = entry.order;
-                              });
-                            }
                             const getPlannerLineDisplayStart = (entry: ScheduledLineEntry) => {
                               const entryRunningStart = getRunningOrderStart(entry.order);
                               if (entryRunningStart) return entryRunningStart;
-                              return plannerLineDisplayTimesByOrderId.get(entry.order.id)?.start || entry.prodStart;
+                              return entry.prodStart;
                             };
                             const getPlannerLineDisplayEnd = (entry: ScheduledLineEntry) =>
-                              plannerLineDisplayTimesByOrderId.get(entry.order.id)?.end ||
                               new Date(getPlannerLineDisplayStart(entry).getTime() + entry.duration * 60000);
                             
                               const lineIssue = storingen[lid];

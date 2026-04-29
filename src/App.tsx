@@ -3658,13 +3658,16 @@ export default function App() {
 
   const visiblePlannerTriggers = activePlannerTriggerRows;
 
-  const operatorDisplayEntries = useMemo(() => {
-        console.trace('operatorDisplayEntries triggered');
-        if (!isOperatorView) return [];
-
+  const buildOperatorDisplayEntriesForLine = useCallback((
+    lid: LineId,
+    linePlannedEntries: ScheduledLineEntry[],
+    currentOrder: Order | null,
+    currentActualEnd: Date | null,
+    runtimeShiftMs: number
+  ) => {
         const nowMinutes = planningTimeRef.current.getHours() * 60 + planningTimeRef.current.getMinutes();
-    
-        const prioritizedEntries = plannedEntries
+
+        const prioritizedEntries = linePlannedEntries
           .map((entry, index) => ({
             ...entry,
             originalIndex: index,
@@ -3672,7 +3675,6 @@ export default function App() {
           }));
         if (prioritizedEntries.length === 0) return [];
 
-        const lid = prioritizedEntries[0].order.line;
         const isOperatorPrioTwoBulk = (order: Order) =>
           normalizePkg(order.pkg) === 'bulk' &&
           order.status === 'planned' &&
@@ -3738,9 +3740,9 @@ export default function App() {
 
           return sorted;
         };
-        const sortedEntriesBase = manualOperatorOrderLines[selectedLine]
+        const sortedEntriesBase = manualOperatorOrderLines[lid]
           ? prioritizedEntries
-          : sortByBestNext(prioritizedEntries, displayedCurrentOrder || null);
+          : sortByBestNext(prioritizedEntries, currentOrder || null);
         const sortedEntries = sortedEntriesBase.slice().sort((a, b) => {
           const aPrioTwoBulk = isOperatorPrioTwoBulk(a.order);
           const bPrioTwoBulk = isOperatorPrioTwoBulk(b.order);
@@ -3756,7 +3758,7 @@ export default function App() {
         const starts = getScheduledStartsForLine(orderedOrders, lid);
 
         let cursorEnd: Date | null = null;
-        if (!displayedCurrentOrder && sortedEntries.length > 0) {
+        if (!currentOrder && sortedEntries.length > 0) {
           const firstOrder = sortedEntries[0].order;
           const firstPrevOrder = null;
           const firstStartTime = starts[0];
@@ -3775,10 +3777,10 @@ export default function App() {
           const sw = swMats.length;
           const duration = rt(order, LINES[lid].speed);
           const transitionMinutes = getTransitionMinutes(lid, prevOrder, order);
-          let startTime = cursorEnd ? new Date(cursorEnd) : new Date(scheduledStart.getTime() + operatorRuntimeShiftMs);
+          let startTime = cursorEnd ? new Date(cursorEnd) : new Date(scheduledStart.getTime() + runtimeShiftMs);
           let prodStart = new Date(startTime.getTime() + transitionMinutes * 60000);
-          if (index === 0 && displayedCurrentOrder?.status === 'running' && displayedCurrentActualEnd && prodStart.getTime() < displayedCurrentActualEnd.getTime()) {
-            prodStart = new Date(displayedCurrentActualEnd);
+          if (index === 0 && currentOrder?.status === 'running' && currentActualEnd && prodStart.getTime() < currentActualEnd.getTime()) {
+            prodStart = new Date(currentActualEnd);
             startTime = new Date(prodStart.getTime() - transitionMinutes * 60000);
           }
           const heldLoadDateTime = getHeldLoadDateTime(order, prodStart);
@@ -3817,10 +3819,59 @@ export default function App() {
             swMats,
             sw,
             duration,
-            operatorState
+            operatorState,
+            plannerState: operatorState
           };
         });
-  }, [isOperatorView, plannedEntries, storingen, bunkers, selectedLine, getScheduledStartsForLine, getTransitionMinutes, operatorRuntimeShiftMs, displayedCurrentOrder, displayedCurrentActualEnd, getOrderLoadReferenceTime, manualOperatorOrderLines]);
+  }, [storingen, bunkers, getScheduledStartsForLine, getTransitionMinutes, getOrderLoadReferenceTime, manualOperatorOrderLines]);
+
+  const operatorSchemaEntriesByLine = useMemo(() => {
+    if (!(isPlannerView && plannerTab === 'schema')) {
+      return { 1: [], 2: [], 3: [] } as Record<LineId, ScheduledLineEntry[]>;
+    }
+
+    const isVisibleOnSelectedDate = (entry: ScheduledLineEntry) => {
+      const runningStart = getRunningOrderStart(entry.order);
+      return formatLocalDate(runningStart || entry.prodStart) === plannerSelectedDate;
+    };
+
+    return lineIds.reduce((result, lid) => {
+      const runningEntry = lineTimelineByLine[lid].find(entry => entry.order.status === 'running') || null;
+      const runningOrder = runningEntry?.order || null;
+      const runningStart = runningOrder && runningEntry
+        ? (getRunningOrderStart(runningOrder) || runningEntry.prodStart)
+        : null;
+      const runningActualEnd = runningOrder && runningStart
+        ? new Date(runningStart.getTime() + rt(runningOrder, LINES[lid].speed) * 60000)
+        : null;
+      const runtimeShiftMs = runningEntry && runningActualEnd
+        ? Math.max(0, runningActualEnd.getTime() - runningEntry.endTime.getTime())
+        : 0;
+      const plannedLineEntries = lineTimelineByLine[lid].filter(entry => entry.order.status === 'planned' || entry.order.status === 'arrived');
+
+      result[lid] = buildOperatorDisplayEntriesForLine(
+        lid,
+        plannedLineEntries,
+        runningOrder,
+        runningActualEnd,
+        runtimeShiftMs
+      ).filter(isVisibleOnSelectedDate);
+      return result;
+    }, { 1: [], 2: [], 3: [] } as Record<LineId, ScheduledLineEntry[]>);
+  }, [isPlannerView, plannerTab, lineIds, lineTimelineByLine, plannerSelectedDate, buildOperatorDisplayEntriesForLine]);
+
+  const operatorDisplayEntries = useMemo(() => {
+        console.trace('operatorDisplayEntries triggered');
+        if (!isOperatorView) return [];
+
+        return buildOperatorDisplayEntriesForLine(
+          selectedLine,
+          plannedEntries,
+          displayedCurrentOrder,
+          displayedCurrentActualEnd,
+          operatorRuntimeShiftMs
+        );
+  }, [isOperatorView, buildOperatorDisplayEntriesForLine, selectedLine, plannedEntries, displayedCurrentOrder, displayedCurrentActualEnd, operatorRuntimeShiftMs]);
 
   const nextOperatorOrder = useMemo(
     () => operatorDisplayEntries[0]?.order || null,
@@ -4668,6 +4719,7 @@ export default function App() {
                 minutesToTimeString={minutesToTimeString}
                 newDriverForm={newDriverForm}
                 openEtaEdit={openEtaEdit}
+                operatorSchemaEntriesByLine={operatorSchemaEntriesByLine}
                 parseLocalDate={parseLocalDate}
                 plannedActiveOrders={plannedActiveOrders}
                 plannerDisplayIndexByLine={plannerDisplayIndexByLine}
